@@ -1,0 +1,34 @@
+# Локальне середовище для Лаб. 01: SQL Server (Проєкти №1 і №2) та MongoDB (Проєкт №3).
+# Запуск:   docker compose -f db/docker-compose.yml up -d
+# Зупинка:  docker compose -f db/docker-compose.yml down        (дані зберігаються у томах)
+# Скидання: docker compose -f db/docker-compose.yml down -v     (видаляє томи з даними)
+#
+# Пароль sa — лише для локальної розробки. Його можна перевизначити змінною MSSQL_SA_PASSWORD.
+
+name: lab01
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: lab01-sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-Lab01_StrongPass2026}"
+    ports:
+      - "1433:1433"
+    volumes:
+      - ./:/scripts:ro              # db/ монтується як /scripts — скрипти видно всередині контейнера
+      - sqlserver-data:/var/opt/mssql
+
+  mongo:
+    image: mongo:7
+    container_name: lab01-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./:/scripts:ro
+      - mongo-data:/data/db
+
+volumes:
+  sqlserver-data:
+  mongo-data:
