@@ -2,11 +2,241 @@
 
 Навчальний мікросервісний проєкт курсу «Технології .NET у сучасній веб-інженерії».
 
-**Лабораторна робота №1** — проєктування баз даних для мікросервісної архітектури: три самостійні бази (дві реляційні та одна MongoDB), які разом описують предметну область.
+- **Лабораторна робота №1** — проєктування баз даних для мікросервісної архітектури: три самостійні бази (дві реляційні та одна MongoDB), які разом описують предметну область.
+- **Лабораторна робота №2** — сервіс `Enrollments` на базі Проєкту №1: тришарова архітектура (Web/API → BLL → DAL) на ADO.NET і Dapper з Unit of Work, запуск через .NET Aspire.
 
 ## Предметна область
 
 Платформа онлайн-курсів. Викладачі публікують платні курси з уроками, студенти знаходять їх у каталозі, оформлюють замовлення та оплачують його, після чого отримують доступ до навчання. Студенти залишають відгуки й оцінки та ставлять питання в обговореннях курсу, а викладачі на них відповідають.
+
+## Що потрібно для запуску
+
+| Інструмент | Навіщо |
+|---|---|
+| [.NET 10 SDK](https://dotnet.microsoft.com/download) | збірка й запуск рішення `Platform.slnx` |
+| Docker Desktop (запущений) | .NET Aspire піднімає в ньому контейнер SQL Server |
+
+Окремо встановлювати SQL Server, Aspire CLI чи робочі навантаження не потрібно: оркестратор і панель Aspire приходять NuGet-пакетами під час першої збірки.
+
+## Запуск через .NET Aspire
+
+Одна команда з кореня репозиторію піднімає базу даних і API разом:
+
+```powershell
+dotnet run --project Platform.AppHost
+```
+
+Що відбувається:
+
+1. Aspire запускає контейнер SQL Server (ресурс `sql`) з томом для даних.
+2. Створює базу `EnrollmentsDb` скриптами Лаб. 01 — `db/p1/schema.sql`, `procedures.sql`, `seed.sql`. Скрипти ідемпотентні, тому повторні запуски нічого не дублюють.
+3. Запускає `Enrollments.Api` (ресурс `enrollments-api`) і передає йому рядок підключення змінною оточення `ConnectionStrings__EnrollmentsDb`.
+
+У консолі з'явиться посилання на **Aspire Dashboard**. У ньому обидва ресурси мають бути в статусі `Running`; там же видно адресу API, його логи та рядок підключення до бази. Swagger відкривається за адресою `<адреса API>/swagger` (типово `http://localhost:5209/swagger`).
+
+За замовчуванням AppHost стартує профілем `http`, якому не потрібен довірений сертифікат розробника. Щоб запустити панель і API по HTTPS, один раз довірте сертифікат і вкажіть профіль явно:
+
+```powershell
+dotnet dev-certs https --trust
+dotnet run --project Platform.AppHost --launch-profile https
+```
+
+Без довіреного сертифіката профіль `https` показує в Dashboard «Lost connection to the AppHost», а в консолі — помилку `UntrustedRoot`.
+
+### Знімки екрана
+
+Aspire Dashboard — контейнер SQL Server, база `EnrollmentsDb` і API в статусі `Running`:
+
+![Aspire Dashboard: ресурси sql, EnrollmentsDb та enrollments-api у статусі Running](docs/screenshots/aspire-dashboard.png)
+
+Swagger — перелік ендпоінтів сервісу Enrollments:
+
+![Swagger: ендпоінти Courses, Orders і Students](docs/screenshots/swagger.png)
+
+### Запуск без Aspire
+
+Якщо `EnrollmentsDb` уже розгорнута на власному SQL Server (див. [Розгортання баз даних вручну](#розгортання-баз-даних-вручну)), API запускається окремо. Рядок підключення береться з `Services/Enrollments/Enrollments.Api/appsettings.json` і перевизначається змінною оточення:
+
+```powershell
+$env:ConnectionStrings__EnrollmentsDb = "Server=localhost;Database=EnrollmentsDb;Trusted_Connection=True;TrustServerCertificate=True"
+dotnet run --project Services/Enrollments/Enrollments.Api
+```
+
+## Схема рішення
+
+```mermaid
+flowchart TD
+    client(["HTTP-клієнт, Swagger"]) --> api
+
+    subgraph service ["Сервіс Enrollments"]
+        api["Enrollments.Api<br/>контролери, ProblemDetails, Swagger"]
+        bll["Enrollments.Bll<br/>сервіси, DTO, AutoMapper, бізнес-правила"]
+        dal["Enrollments.Dal<br/>репозиторії ADO.NET і Dapper, Unit of Work"]
+        domain["Enrollments.Domain<br/>моделі, доменні винятки"]
+        api --> bll
+        bll --> dal
+        bll -.-> domain
+        dal -.-> domain
+    end
+
+    dal --> db[("EnrollmentsDb<br/>SQL Server")]
+    apphost["Platform.AppHost<br/>.NET Aspire"] -. "запускає, передає рядок підключення" .-> api
+    apphost -. "запускає контейнер, створює базу" .-> db
+```
+
+Залежності спрямовані в один бік: `Api → Bll → Dal`, а `Domain` підключають і `Bll`, і `Dal`. Контролер ніколи не звертається до репозиторію напряму — лише через сервіс.
+
+| Проєкт | Призначення |
+|---|---|
+| `Platform.AppHost` | оркестрація .NET Aspire: контейнер SQL Server, база, API |
+| `Enrollments.Api` | контролери, `Program.cs` (DI, логування, Swagger), глобальний обробник помилок |
+| `Enrollments.Bll` | сервіси, DTO, профілі AutoMapper, бізнес-правила |
+| `Enrollments.Dal` | інтерфейси й реалізації репозиторіїв, Unit of Work, перетворення помилок SQL |
+| `Enrollments.Domain` | моделі таблиць, статуси замовлення, доменні винятки |
+| `Enrollments.Tests` | unit-тести BLL і API-тести (без бази даних) |
+
+### Шар доступу до даних
+
+| Репозиторій | Технологія | Особливості |
+|---|---|---|
+| `StudentRepository` | чистий ADO.NET | `SqlCommand` з типізованими параметрами, ручне читання через `SqlDataReader`; свідомо не успадковує Generic Repository; оновлення з перевіркою `RowVersion` |
+| `OrderRepository` | Dapper | multi-mapping (замовлення + реквізити + позиції одним запитом), виклики процедур `usp_ChangeOrderStatus`, `usp_GetStudentOrders`, `usp_DeleteOrder`, блокування рядка `UPDLOCK` |
+| `CourseRepository` | Dapper | `QueryMultipleAsync` для сторінки з лічильником, агрегація продажів |
+| `OrderStatusHistoryRepository` | Dapper | журнал статусів |
+
+Три Dapper-репозиторії успадковують `BaseDapperRepository<T>`, де спільний CRUD написано один раз. Усі значення передаються в запити лише параметрами. `UnitOfWork` відкриває одне з'єднання на HTTP-запит і роздає його всім репозиторіям разом із поточною транзакцією.
+
+### Транзакції
+
+| Операція | Що змінює | Як захищена |
+|---|---|---|
+| Оформлення замовлення (`POST /api/orders`) | `Orders`, `OrderDetails`, `OrderItems`, `OrderStatusHistory` через репозиторії `Orders` і `StatusHistory`; читає `Students` і `Courses` | транзакція Unit of Work, `ReadCommitted` |
+| Додавання курсу (`POST /api/orders/{id}/items`) | `OrderItems`, `Orders.TotalAmount` | транзакція Unit of Work, `ReadCommitted` + блокування рядка замовлення (`UPDLOCK`) |
+| Зміна статусу (`/checkout`, `/pay`, …) | `Orders`, `OrderStatusHistory` | процедура `usp_ChangeOrderStatus` з власною транзакцією |
+
+Будь-яка помилка всередині транзакції відкочує всі зміни: якщо друга позиція замовлення посилається на недоступний курс, уже вставлене замовлення зникає.
+
+**Рівень ізоляції — `ReadCommitted`.** «Брудних» читань немає, а блокування читання знімаються одразу, тож паралельні запити майже не чекають один одного. Вищі рівні (`RepeatableRead`, `Serializable`) прибирають більше аномалій, але тримають блокування до кінця транзакції — зростає час очікування й ризик взаємних блокувань. Тому там, де треба захистити послідовність «прочитав — перевірив — записав», сервіс не піднімає рівень усієї транзакції, а блокує один рядок замовлення. **Таймаут команди — 30 секунд.**
+
+Назва й ціна курсу записуються в позицію замовлення як **знімок** з локального довідника `Courses` у момент оформлення — за політикою дублювання нижче.
+
+### Помилки
+
+Помилки проходять ланцюжок «процедура → DAL → BLL → HTTP-статус». DAL перетворює `SqlException` на доменні винятки, а єдиний глобальний обробник `DomainExceptionHandler` — на відповідь у форматі ProblemDetails:
+
+| Виняток | Статус | Приклад |
+|---|---|---|
+| `NotFoundException` | 404 | замовлення чи студента не існує (`THROW 50001`, `50002`) |
+| `BusinessConflictException` | 409 | недопустимий перехід статусу (`THROW 50003`), дубль Email, застарілий `RowVersion` |
+| `ValidationException` | 400 | знижка більша за ціну курсу, один курс двічі в замовленні |
+| помилка атрибутів на DTO | 400 | порожній список позицій, некоректний Email — запит відхиляється ще до виклику сервісу |
+| будь-який інший | 500 | деталі лише в лозі, клієнт отримує `traceId` |
+
+## API сервісу Enrollments
+
+| Метод і шлях | Що робить | Успіх |
+|---|---|---|
+| `GET /api/students?search=&page=&pageSize=` | сторінка студентів | 200 |
+| `GET /api/students/{id}` | студент | 200 |
+| `POST /api/students` | створити студента | 201 + `Location` |
+| `PUT /api/students/{id}` | оновити студента (з `rowVersion`) | 200 |
+| `DELETE /api/students/{id}` | м'яко видалити студента | 204 |
+| `GET /api/students/{id}/orders?status=` | замовлення студента | 200 |
+| `GET /api/courses?search=` | курси, доступні для купівлі | 200 |
+| `GET /api/courses/{id}` | курс | 200 |
+| `GET /api/courses/{id}/sales` | продажі курсу | 200 |
+| `GET /api/orders/{id}` | замовлення з реквізитами й позиціями | 200 |
+| `GET /api/orders/{id}/history` | історія статусів | 200 |
+| `POST /api/orders` | оформити замовлення | 201 + `Location` |
+| `POST /api/orders/{id}/items` | додати курс до замовлення | 200 |
+| `POST /api/orders/{id}/checkout` | `Submitted → AwaitingPayment` | 204 |
+| `POST /api/orders/{id}/pay` | `AwaitingPayment → Paid` | 204 |
+| `POST /api/orders/{id}/grant-access` | `Paid → AccessGranted` | 204 |
+| `POST /api/orders/{id}/cancel` | скасувати (лише до оплати) | 204 |
+| `POST /api/orders/{id}/refund` | `Paid → Refunded` | 204 |
+| `DELETE /api/orders/{id}` | м'яко видалити чернетку або скасоване замовлення | 204 |
+
+Курси в цьому сервісі лише читаються: це локальна копія довідника, власником якого є сервіс Courses.
+
+## Приклади запитів
+
+Ті самі запити у форматі для VS Code та Visual Studio лежать у [Enrollments.Api.http](Services/Enrollments/Enrollments.Api/Enrollments.Api.http). Нижче — `curl`; замініть адресу на ту, що показує Aspire Dashboard.
+
+Оформити замовлення — транзакція через кілька репозиторіїв, відповідь `201 Created` із заголовком `Location`:
+
+```bash
+curl -i -X POST http://localhost:5209/api/orders \
+  -H "Content-Type: application/json" \
+  -d '{"studentId":3,"billingName":"Sofiia Lysenko","billingEmail":"sofiia.lysenko@example.com","paymentMethod":"Card","items":[{"courseId":2,"discount":100},{"courseId":4,"discount":0}]}'
+```
+
+Прочитати замовлення з позиціями — у позиціях видно знімок назви й ціни курсу:
+
+```bash
+curl http://localhost:5209/api/orders/1
+```
+
+Пройти життєвий цикл замовлення 3 — кожен крок повертає `204 No Content`:
+
+```bash
+curl -i -X POST http://localhost:5209/api/orders/3/checkout
+curl -i -X POST http://localhost:5209/api/orders/3/pay
+curl -i -X POST http://localhost:5209/api/orders/3/grant-access
+```
+
+Оплатити вже оплачене замовлення — `409 Conflict` у форматі ProblemDetails:
+
+```bash
+curl -i -X POST http://localhost:5209/api/orders/3/pay
+```
+
+```json
+{
+  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.10",
+  "title": "Business rule conflict",
+  "status": 409,
+  "detail": "Status transition AccessGranted -> Paid is not allowed",
+  "traceId": "0HNG..."
+}
+```
+
+Відкат транзакції — курс 6 недоступний, тому `409`, і замовлення не створюється:
+
+```bash
+curl -i -X POST http://localhost:5209/api/orders \
+  -H "Content-Type: application/json" \
+  -d '{"studentId":3,"billingName":"Sofiia Lysenko","billingEmail":"sofiia.lysenko@example.com","paymentMethod":"Card","items":[{"courseId":2,"discount":0},{"courseId":6,"discount":0}]}'
+```
+
+Неіснуюче замовлення — `404 Not Found`, а не `500`:
+
+```bash
+curl -i http://localhost:5209/api/orders/999999
+```
+
+Некоректний запит — `400 Bad Request` із переліком помилок ще до виклику сервісу:
+
+```bash
+curl -i -X POST http://localhost:5209/api/orders \
+  -H "Content-Type: application/json" \
+  -d '{"studentId":0,"billingName":"","billingEmail":"not-an-email","paymentMethod":"Cash","items":[]}'
+```
+
+Значення зі спецсимволом — апостроф в імені не викликає помилки SQL, бо всі значення йдуть параметрами:
+
+```bash
+curl -i -X POST http://localhost:5209/api/students \
+  -H "Content-Type: application/json" \
+  -d "{\"email\":\"conan.obrien@example.com\",\"fullName\":\"Conan O'Brien\"}"
+```
+
+## Тести
+
+```powershell
+dotnet test Platform.slnx
+```
+
+Тести не потребують бази даних: unit-тести BLL замінюють репозиторії та Unit of Work підставними об'єктами (перевіряють знімок назви й ціни, відкат транзакції при помилці, доменні винятки), а API-тести піднімають справжній конвеєр ASP.NET Core з підставними сервісами (перевіряють статуси 201, 204, 400, 404, 409, 500, формат ProblemDetails і опис Swagger). Окремий тест перевіряє конфігурацію AutoMapper (`AssertConfigurationIsValid`).
 
 ## Контексти та бази даних
 
@@ -186,7 +416,16 @@ erDiagram
 ## Структура репозиторію
 
 ```
-README.md                  опис домену, розгортання, таблиця дублювання, ERD
+README.md                  опис домену, запуск, розгортання БД, таблиця дублювання, ERD
+Platform.slnx              одне рішення на всю платформу
+Platform.AppHost/          оркестрація .NET Aspire (AppHost.cs)
+Services/
+  Enrollments/             Проєкт №1 — ADO.NET + Dapper
+    Enrollments.Api/       контролери, Program.cs, appsettings.json, обробник помилок
+    Enrollments.Bll/       сервіси, DTO, профілі AutoMapper, бізнес-правила
+    Enrollments.Dal/       інтерфейси й реалізації репозиторіїв, Unit of Work
+    Enrollments.Domain/    моделі, статуси, доменні винятки
+    Enrollments.Tests/     unit-тести BLL і API-тести
 docs/
   contexts.md              контексти, агрегати, обґрунтування рішень
   erd-p1.md, erd-p1.png    ERD, обмеження, індекси та процедури Проєкту №1
@@ -209,7 +448,9 @@ db/
     queries.js             запити перевірки та aggregation pipeline
 ```
 
-## Розгортання
+## Розгортання баз даних вручну
+
+Базу `EnrollmentsDb` для сервісу Enrollments створює сам Aspire (див. [Запуск через .NET Aspire](#запуск-через-net-aspire)). Цей розділ потрібен, щоб розгорнути всі три бази без Aspire — на власному SQL Server і MongoDB або в контейнерах із `db/docker-compose.yml`.
 
 Потрібні SQL Server 2019 або новіший і MongoDB 6 або новіша. Усі скрипти ідемпотентні: їх можна запускати повторно.
 
@@ -332,4 +573,4 @@ EXEC dbo.usp_ChangeOrderStatus @OrderId = 3, @NewStatus = N'AccessGranted';
 
 ## Що далі
 
-Ці бази — основа наступних робіт: Лаб. 02 — тришарова архітектура на ADO.NET і Dapper поверх `EnrollmentsDb`, Лаб. 03 — EF Core поверх `CoursesDb`, Лаб. 04 — MongoDB поверх `feedback_db`.
+Наступні роботи додають сервіси для двох інших баз: Лаб. 03 — EF Core поверх `CoursesDb`, Лаб. 04 — MongoDB поверх `feedback_db`.

@@ -1,0 +1,111 @@
+### Приклади запитів до Enrollments.Api.
+### Адресу API візьміть з Aspire Dashboard (ресурс enrollments-api) або з launchSettings.json.
+@host = http://localhost:5209
+
+### Курси, доступні для купівлі
+GET {{host}}/api/courses?search=net&page=1&pageSize=10
+
+### Продажі курсу
+GET {{host}}/api/courses/1/sales
+
+### Студенти з пошуком
+GET {{host}}/api/students?search=Ол&page=1&pageSize=10
+
+### Створити студента (апостроф у імені не ламає SQL — значення йдуть параметрами)
+POST {{host}}/api/students
+Content-Type: application/json
+
+{
+  "email": "conan.obrien@example.com",
+  "fullName": "Conan O'Brien",
+  "phone": "+380501234567"
+}
+
+### Оновити студента (rowVersion — із відповіді GET /api/students/{id})
+PUT {{host}}/api/students/1
+Content-Type: application/json
+
+{
+  "email": "olena.koval@example.com",
+  "fullName": "Олена Коваль",
+  "phone": "+380501112233",
+  "rowVersion": "AAAAAAAAB9E="
+}
+
+### Замовлення студента зі статусом
+GET {{host}}/api/students/1/orders?status=AccessGranted
+
+### Оформити замовлення: транзакція через кілька репозиторіїв, назва й ціна курсу — знімок
+POST {{host}}/api/orders
+Content-Type: application/json
+
+{
+  "studentId": 3,
+  "billingName": "Софія Лисенко",
+  "billingEmail": "sofiia.lysenko@example.com",
+  "paymentMethod": "Card",
+  "items": [
+    { "courseId": 2, "discount": 100 },
+    { "courseId": 4, "discount": 0 }
+  ]
+}
+
+### Відкат транзакції: курс 6 недоступний -> 409, замовлення не створюється
+POST {{host}}/api/orders
+Content-Type: application/json
+
+{
+  "studentId": 3,
+  "billingName": "Софія Лисенко",
+  "billingEmail": "sofiia.lysenko@example.com",
+  "paymentMethod": "Card",
+  "items": [
+    { "courseId": 2, "discount": 0 },
+    { "courseId": 6, "discount": 0 }
+  ]
+}
+
+### Помилка валідації -> 400 ще до виклику сервісу
+POST {{host}}/api/orders
+Content-Type: application/json
+
+{
+  "studentId": 0,
+  "billingName": "",
+  "billingEmail": "not-an-email",
+  "paymentMethod": "Cash",
+  "items": []
+}
+
+### Замовлення з позиціями
+GET {{host}}/api/orders/1
+
+### Історія статусів
+GET {{host}}/api/orders/1/history
+
+### Додати курс до замовлення у статусі Submitted
+POST {{host}}/api/orders/3/items
+Content-Type: application/json
+
+{ "courseId": 5, "discount": 0 }
+
+### Відправити на оплату: Submitted -> AwaitingPayment (204)
+POST {{host}}/api/orders/3/checkout
+
+### Оплатити: AwaitingPayment -> Paid (204)
+POST {{host}}/api/orders/3/pay
+
+### Оплатити вдруге -> 409 у форматі ProblemDetails
+POST {{host}}/api/orders/3/pay
+
+### Відкрити доступ: Paid -> AccessGranted (204)
+POST {{host}}/api/orders/3/grant-access
+
+### Скасувати після оплати -> 409
+POST {{host}}/api/orders/1/cancel
+
+### Неіснуюче замовлення -> 404, а не 500
+GET {{host}}/api/orders/999999
+
+### Видалити скасоване замовлення (204)
+DELETE {{host}}/api/orders/4
