@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Services\Enrollments\Enrollments.Api\Enrollments.Api.csproj" />
+    <ProjectReference Include="..\Services\Courses\Courses.Api\Courses.Api.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -4,6 +4,7 @@
 
 - **Лабораторна робота №1** — проєктування баз даних для мікросервісної архітектури: три самостійні бази (дві реляційні та одна MongoDB), які разом описують предметну область.
 - **Лабораторна робота №2** — сервіс `Enrollments` на базі Проєкту №1: тришарова архітектура (Web/API → BLL → DAL) на ADO.NET і Dapper з Unit of Work, запуск через .NET Aspire.
+- **Лабораторна робота №3** — сервіс `Courses` на базі Проєкту №2: EF Core Code First, Fluent API, міграції й сідінг, Generic Repository і Unit of Work, специфікації, пагінація, FluentValidation, Serilog. Див. [Сервіс Courses](#сервіс-courses--ef-core-лаб-03).
 
 ## Предметна область
 
@@ -31,8 +32,14 @@ dotnet run --project Platform.AppHost
 1. Aspire запускає контейнер SQL Server (ресурс `sql`) з томом для даних.
 2. Створює базу `EnrollmentsDb` скриптами Лаб. 01 — `db/p1/schema.sql`, `procedures.sql`, `seed.sql`. Скрипти ідемпотентні, тому повторні запуски нічого не дублюють.
 3. Запускає `Enrollments.Api` (ресурс `enrollments-api`) і передає йому рядок підключення змінною оточення `ConnectionStrings__EnrollmentsDb`.
+4. Створює порожню базу `CoursesDb` і запускає `Courses.Api` (ресурс `courses-api`). Під час старту сервіс сам застосовує міграції EF Core і наповнює базу початковими даними.
 
-У консолі з'явиться посилання на **Aspire Dashboard**. У ньому обидва ресурси мають бути в статусі `Running`; там же видно адресу API, його логи та рядок підключення до бази. Swagger відкривається за адресою `<адреса API>/swagger` (типово `http://localhost:5209/swagger`).
+У консолі з'явиться посилання на **Aspire Dashboard**. У ньому всі ресурси мають бути в статусі `Running`; там же видно адреси API, їхні логи та рядки підключення до баз.
+
+| Сервіс | Swagger |
+|---|---|
+| Enrollments (Лаб. 02) | `http://localhost:5209/swagger` |
+| Courses (Лаб. 03) | `http://localhost:5141/swagger` |
 
 За замовчуванням AppHost стартує профілем `http`, якому не потрібен довірений сертифікат розробника. Щоб запустити панель і API по HTTPS, один раз довірте сертифікат і вкажіть профіль явно:
 
@@ -236,7 +243,223 @@ curl -i -X POST http://localhost:5209/api/students \
 dotnet test Platform.slnx
 ```
 
+Тести обох сервісів не потребують ні бази, ні Docker. Для сервісу Courses окремо перевіряються правила сутностей, специфікації (на колекції в пам'яті), валідатори, відповідність моделі EF останній міграції та переклад кожного запиту репозиторіїв у SQL.
+
 Тести не потребують бази даних: unit-тести BLL замінюють репозиторії та Unit of Work підставними об'єктами (перевіряють знімок назви й ціни, відкат транзакції при помилці, доменні винятки), а API-тести піднімають справжній конвеєр ASP.NET Core з підставними сервісами (перевіряють статуси 201, 204, 400, 404, 409, 500, формат ProblemDetails і опис Swagger). Окремий тест перевіряє конфігурацію AutoMapper (`AssertConfigurationIsValid`).
+
+## Сервіс Courses — EF Core (Лаб. 03)
+
+Сервіс каталогу курсів поверх бази Проєкту №2. Будова та сама, що в `Enrollments`, але доступ до даних побудовано на EF Core: модель у коді, Fluent API, міграції та LINQ to Entities.
+
+```mermaid
+flowchart TD
+    client(["HTTP-клієнт, Swagger"]) --> api
+    subgraph service ["Сервіс Courses"]
+        api["Courses.Api<br/>контролери, FluentValidation, ProblemDetails, Serilog"]
+        bll["Courses.Bll<br/>сервіси, DTO, AutoMapper, специфікації"]
+        dal["Courses.Dal<br/>DbContext, конфігурації, міграції, репозиторії, Unit of Work, сідінг"]
+        domain["Courses.Domain<br/>сутності з бізнес-правилами, доменні винятки"]
+        api --> bll
+        bll --> dal
+        bll -.-> domain
+        dal -.-> domain
+    end
+    dal --> db[("CoursesDb<br/>SQL Server")]
+```
+
+| Проєкт | Що в ньому |
+|---|---|
+| `Courses.Domain` | 6 сутностей із приватними setter-ами: `Course`, `CourseDetail`, `Lesson`, `Category`, `CourseCategory`, `Instructor`; 4 доменні винятки |
+| `Courses.Dal` | `CoursesDbContext`, `Configurations/` (по класу на сутність), `Migrations/`, Generic Repository, 4 специфічні репозиторії, `UnitOfWork`, `Seeding/DbInitializer` |
+| `Courses.Bll` | 3 сервіси, DTO, профілі AutoMapper, `Specifications/`, `Validation/` (FluentValidation) |
+| `Courses.Api` | 3 контролери, `DomainExceptionHandler`, `CorrelationIdMiddleware`, `Program.cs`, `Dockerfile` |
+| `Courses.Tests` | 68 тестів без бази даних |
+
+### Модель і Fluent API
+
+Сутності не мають відкритих setter-ів: стан змінюють лише методи, які перевіряють правила самої сутності — так побудовано `CatalogItem` в eShop.
+
+| Метод `Course` | Правило |
+|---|---|
+| конструктор, `ChangePrice` | ціна від 0 до 1 000 000; Slug лише з малих латинських літер, цифр і дефісів |
+| `Publish` | потрібні опис і хоча б один урок; повторна публікація заборонена |
+| `AddLesson` | номер уроку — наступний після наявних |
+| `AssignCategory` | без дублів; основна категорія лише одна, перша додана стає основною сама |
+| `Delete` | м'яке видалення; опублікований курс спершу знімають з публікації |
+
+Правила, яким потрібні інші дані з бази (унікальність Slug та Email, існування викладача й категорій), перевіряють сервіси BLL.
+
+Кожна сутність має окремий клас `IEntityTypeConfiguration<T>` у `Courses.Dal/Configurations`; усі вони підключаються одним рядком `ApplyConfigurationsFromAssembly` в `OnModelCreating`. Назви таблиць, обмежень та індексів збігаються зі схемою з Лаб. 01 (`db/p2/schema.sql`):
+
+- `decimal(18,2)` для цін, довжини рядків, `datetime2(3)` для дат;
+- 9 CHECK-обмежень (`CK_Courses_Price`, `CK_Courses_Level`, …);
+- унікальні індекси `UQ_Courses_Slug`, `UQ_Instructors_Email`, `UQ_Categories_Name`, `UQ_Categories_Slug`, `UQ_Lessons_CourseId_OrderIndex`;
+- фільтровані й покриваючі індекси `IX_Courses_Level_Price`, `IX_Courses_InstructorId`, `UX_CourseCategories_Primary`;
+- `ROWVERSION` для оптимістичної конкурентності;
+- глобальний фільтр `IsDeleted = 0` для м'якого видалення.
+
+| Зв'язок | Як налаштовано |
+|---|---|
+| 1:1 `Course` ↔ `CourseDetail` | `HasOne(...).WithOne(...).HasForeignKey<CourseDetail>(d => d.CourseId)` — ключ є водночас FK |
+| 1:N `Instructor` → `Course`, `Course` → `Lesson` | `HasMany(...).WithOne(...)`; уроки видаляються каскадом, викладач — `Restrict` |
+| M:N `Course` ↔ `Category` | явна проміжна сутність `CourseCategory` зі складеним ключем і власними полями `AddedAt`, `IsPrimary` |
+
+### Міграції
+
+Інструмент `dotnet-ef` зафіксовано в маніфесті `dotnet-tools.json`, тож встановлюється однією командою. DbContext лежить у `Courses.Dal`, рядок підключення — у `Courses.Api`, тому вказуються обидва проєкти:
+
+```powershell
+dotnet tool restore
+
+# нова міграція
+dotnet dotnet-ef migrations add <Name> --project Services/Courses/Courses.Dal --startup-project Services/Courses/Courses.Api --output-dir Migrations
+
+# застосувати до бази з appsettings.json (без Aspire)
+dotnet dotnet-ef database update --project Services/Courses/Courses.Dal --startup-project Services/Courses/Courses.Api
+
+# SQL-скрипт для перегляду або ручного виконання
+dotnet dotnet-ef migrations script --idempotent --project Services/Courses/Courses.Dal --startup-project Services/Courses/Courses.Api --output Services/Courses/Courses.Dal/Migrations/InitialCreate.sql
+```
+
+Початкова міграція — `Courses.Dal/Migrations/*_InitialCreate.cs` разом зі знімком моделі `CoursesDbContextModelSnapshot.cs`; згенерований скрипт — `Courses.Dal/Migrations/InitialCreate.sql`. Під Aspire міграції застосовує сам сервіс під час старту (`MigrateAsync`). Тест `Model_has_no_changes_missing_from_the_migrations` падає, якщо модель змінили, а міграцію не додали.
+
+### Сідінг
+
+| Режим | Що | Де |
+|---|---|---|
+| модельний (статичний) | довідник 5 категорій із фіксованими Id | `HasData` у `CategoryConfiguration` — потрапляє в міграцію |
+| програмний | 3 викладачі, 6 курсів з описами, уроками й категоріями | `DbInitializer.SeedAsync` у `Program.cs` після `MigrateAsync` |
+
+Програмний сідінг перевіряє кожен запис перед вставкою (викладача — за Email, курс — за Slug), тож повторний запуск нічого не дублює: у лозі другого старту `0 instructor(s) and 0 course(s) inserted`. Спершу довідники (міграція), потім залежні записи — FK не порушуються. Курси вставляються по одному, тому на чистій базі мають Id 1–6, як у копії довідника `EnrollmentsDb` і в `feedback_db`.
+
+| Параметр конфігурації | За замовчуванням | Що робить |
+|---|---|---|
+| `Database:MigrateOnStartup` | `true` | застосувати міграції під час старту |
+| `Database:SeedOnStartup` | `true`, крім Production | виконати програмний сідінг |
+
+### Репозиторії, Unit of Work, специфікації
+
+| Репозиторій | Спосіб завантаження | Метод |
+|---|---|---|
+| `GenericRepository<T>` | `DbSet<T>` | `GetByIdAsync`, `GetAllAsync`, `AddAsync`, `ListAsync(spec)`, `CountAsync(spec)` — асинхронні; `Update`, `Delete` лише змінюють стан у контексті |
+| `CourseRepository` | **Eager Loading** — `Include` / `ThenInclude`, один запит | `GetWithDetailsAsync` |
+| `CategoryRepository` | **Explicit Loading** — `Entry(...).Collection(...).LoadAsync()`, два запити | `GetWithCoursesAsync` |
+| `CourseCategoryRepository` | **LINQ to Entities** через проміжну сутність і її поле `AddedAt` | `GetRecentlyAddedAsync`, `CountCoursesPerCategoryAsync` |
+
+Репозиторії не зберігають змін самі. `UnitOfWork.SaveChangesAsync` викликається один раз наприкінці бізнес-операції — EF Core записує всі зміни в одній транзакції — і перетворює конфлікт `RowVersion` та порушення унікальності на `ConflictException`.
+
+Складні вибірки винесено в специфікації (`Ardalis.Specification`) у `Courses.Bll/Specifications`: `CoursesFilterSpec` описує фільтри, `Include`, сортування й сторінку каталогу, `InstructorCoursesSpec` — курси викладача. Репозиторій застосовує будь-яку з них тим самим `WithSpecification(spec)`, без змін у своєму коді; лічильник бере з тієї самої специфікації лише критерії `Where`.
+
+### Пагінація, фільтрація, сортування
+
+`GET /api/courses` приймає:
+
+| Параметр | Значення |
+|---|---|
+| `page` | номер сторінки з 1 |
+| `pageSize` | 1–100, за замовчуванням 20 |
+| `search` | частина назви |
+| `level` | `Beginner`, `Intermediate`, `Advanced` |
+| `categoryId`, `instructorId` | фільтр за категорією або викладачем |
+| `minPrice`, `maxPrice` | діапазон ціни |
+| `isPublished` | `true` / `false` |
+| `sortBy` | `title`, `price`, `publishedAt`, `rating`, `createdAt` — інші поля відхиляються з 400 |
+| `sortDir` | `asc` / `desc` |
+
+Метадані сторінки повертаються **і в тілі, і в заголовках**: тіло — `items`, `totalCount`, `page`, `pageSize`, `totalPages`, `hasNext`, `hasPrevious`; заголовки — `X-Total-Count`, `X-Total-Pages`, `X-Page`, `X-Page-Size`. Фільтри, сортування й `Skip`/`Take` застосовуються до запиту до `ToListAsync`, тому база повертає лише потрібну сторінку (`OFFSET … FETCH`), а `totalCount` рахує окремий `COUNT(*)` з тими самими фільтрами.
+
+### Валідація та помилки
+
+- **DataAnnotations** на DTO — прості правила: обов'язковість, довжини, діапазони. Порушення відхиляє `[ApiController]` ще до виклику контролера.
+- **FluentValidation** (`Courses.Bll/Validation`) — те, чого атрибутами не виразити: формат Slug, назва рівня, дозволені поля сортування, узгодженість діапазону цін і категорій. Валідатори реєструються `AddValidatorsFromAssemblyContaining` і викликаються в контролері явно; застаріле `AddFluentValidation` не використовується.
+- Обидва рівні повертають 400 у форматі `ValidationProblemDetails` з помилками по полях.
+
+`DomainExceptionHandler` — один глобальний обробник: `EntityNotFoundException` → 404, `ValidationException` → 400, `ConflictException` і `DomainException` → 409, решта → 500. Текст несподіваної помилки показується лише в Development; у Production клієнт отримує загальне повідомлення та `traceId`. Кожен виняток логується рівно один раз — в обробнику.
+
+### Логування (Serilog)
+
+Конфігурація — розділ `Serilog` в `Courses.Api/appsettings.json`; рівні перевизначаються в `appsettings.Development.json` або змінними оточення (`Serilog__MinimumLevel__Default=Warning`).
+
+| Що | Як |
+|---|---|
+| sinks | консоль і файл `logs/courses-api-<дата>.json` (JSON, по файлу на день, 7 днів) |
+| рівні | `Information`; `Microsoft.AspNetCore` і `Microsoft.EntityFrameworkCore` — `Warning`; `Microsoft.EntityFrameworkCore.Database.Command` — `Information`, тож у лозі видно SQL кожного запиту |
+| властивості | `CorrelationId` (із заголовка `X-Correlation-ID` або згенерований, повертається у відповіді), `RequestPath`, `UserId`, `SourceContext`, `Application` |
+| HTTP | `UseSerilogRequestLogging` — один підсумковий запис на запит |
+
+### Що видно в лозі SQL
+
+Фрагменти з реального запуску; запити позначено власним `X-Correlation-ID`, щоб знайти їх у лозі:
+
+```text
+eager-demo     GET /api/courses/1     -> 1 SQL-запит
+  SELECT [s0].[Id], … FROM (SELECT TOP(1) … FROM [Courses] … WHERE [c].[Id] = @id) AS [s0]
+  LEFT JOIN [CourseDetails] … LEFT JOIN [Lessons] … LEFT JOIN [CourseCategories] … INNER JOIN [Categories] …
+
+explicit-demo  GET /api/categories/1  -> 2 SQL-запити
+  [1] SELECT TOP(1) [c].[Id], [c].[CreatedAt], [c].[Description], [c].[Name], [c].[Slug] FROM [Categories] AS [c] WHERE [c].[Id] = @id
+  [2] SELECT [c].[CourseId], [c].[CategoryId], [c].[AddedAt], [c].[IsPrimary], [c1].[Id], … FROM [CourseCategories] AS [c] INNER JOIN …
+
+paging-demo    GET /api/courses?page=2&pageSize=5
+  [1] SELECT COUNT(*) FROM [Courses] AS [c] WHERE [c].[IsDeleted] = CAST(0 AS bit)
+  [2] … WHERE [c].[IsDeleted] = CAST(0 AS bit) ORDER BY [c].[Title], [c].[Id] OFFSET @p ROWS FETCH NEXT @p ROWS ONLY
+```
+
+### API сервісу Courses
+
+| Метод і шлях | Що робить | Успіх |
+|---|---|---|
+| `GET /api/courses` | сторінка каталогу з фільтрами й сортуванням | 200 |
+| `GET /api/courses/{id}` | картка курсу (Eager Loading) | 200 |
+| `POST /api/courses` | створити курс | 201 + `Location` |
+| `PUT /api/courses/{id}/price` | змінити ціну | 204 |
+| `POST /api/courses/{id}/publish`, `/unpublish` | опублікувати / зняти з публікації | 204 |
+| `POST /api/courses/{id}/lessons` | додати урок | 201 + `Location` |
+| `POST /api/courses/{id}/categories` | додати курс у категорію | 204 |
+| `DELETE /api/courses/{id}` | м'яко видалити | 204 |
+| `GET /api/categories` | категорії з кількістю курсів | 200 |
+| `GET /api/categories/{id}` | категорія з курсами (Explicit Loading) | 200 |
+| `GET /api/categories/{slug}/recent-courses?since=` | нещодавно додані курси (LINQ через проміжну сутність) | 200 |
+| `POST /api/categories` | створити категорію | 201 + `Location` |
+| `GET /api/instructors`, `/{id}` | викладачі | 200 |
+| `GET /api/instructors/{id}/courses?publishedOnly=` | курси викладача (друга специфікація) | 200 |
+| `POST /api/instructors` | створити викладача | 201 + `Location` |
+
+Помилки: 400 — невалідні дані, 404 — немає ресурсу, 409 — дубль Slug/Email/категорії або порушене правило сутності.
+
+### Приклади запитів
+
+```bash
+# сторінка 2 по 5 курсів: totalCount — кількість усіх курсів, а не на сторінці
+curl -i "http://localhost:5141/api/courses?page=2&pageSize=5"
+
+# фільтр і сортування
+curl "http://localhost:5141/api/courses?level=Intermediate&sortBy=price&sortDir=desc"
+
+# створити курс -> 201 + Location; повтор із тим самим slug -> 409
+curl -i -X POST http://localhost:5141/api/courses -H "Content-Type: application/json" \
+  -d '{"instructorId":2,"title":"EF Core: продуктивність запитів","slug":"ef-core-performance","price":1700,"level":"Advanced","description":"Профілювання запитів, індекси, split queries","durationHours":12.5,"categoryIds":[3,1],"primaryCategoryId":3}'
+
+# порожня назва -> 400 з помилками по полях
+curl -i -X POST http://localhost:5141/api/courses -H "Content-Type: application/json" \
+  -d '{"instructorId":2,"title":"","slug":"x","price":10,"level":"Beginner","description":"short","durationHours":1,"categoryIds":[]}'
+
+# неіснуючий курс -> 404 у форматі ProblemDetails
+curl -i http://localhost:5141/api/courses/999999
+
+# Eager і Explicit Loading із власним CorrelationId, щоб знайти їхні SQL у лозі
+curl -H "X-Correlation-ID: eager-demo" http://localhost:5141/api/courses/1
+curl -H "X-Correlation-ID: explicit-demo" http://localhost:5141/api/categories/1
+```
+
+### Docker-образ
+
+```powershell
+docker build -f Services/Courses/Courses.Api/Dockerfile -t courses-api .
+docker run -p 8080:8080 -e ConnectionStrings__CoursesDb="Server=host.docker.internal,<port>;Database=CoursesDb;User Id=sa;Password=<пароль>;TrustServerCertificate=True" courses-api
+```
+
+Контекст збірки — корінь репозиторію. Образ багатоетапний: SDK лише для збірки, у фінальному — runtime ASP.NET Core і застосунок, запущений не від root.
 
 ## Контексти та бази даних
 
@@ -426,6 +649,13 @@ Services/
     Enrollments.Dal/       інтерфейси й реалізації репозиторіїв, Unit of Work
     Enrollments.Domain/    моделі, статуси, доменні винятки
     Enrollments.Tests/     unit-тести BLL і API-тести
+  Courses/                 Проєкт №2 — EF Core
+    Courses.Api/           контролери, Program.cs, appsettings.json, обробник помилок, Dockerfile
+    Courses.Bll/           сервіси, DTO, профілі AutoMapper, специфікації, валідатори
+    Courses.Dal/           DbContext, Configurations/, Migrations/, репозиторії, Unit of Work, Seeding/
+    Courses.Domain/        сутності з бізнес-правилами, доменні винятки
+    Courses.Tests/         тести домену, специфікацій, валідаторів, сервісів, моделі EF та API
+dotnet-tools.json          локальний інструмент dotnet-ef
 docs/
   contexts.md              контексти, агрегати, обґрунтування рішень
   erd-p1.md, erd-p1.png    ERD, обмеження, індекси та процедури Проєкту №1
@@ -573,4 +803,4 @@ EXEC dbo.usp_ChangeOrderStatus @OrderId = 3, @NewStatus = N'AccessGranted';
 
 ## Що далі
 
-Наступні роботи додають сервіси для двох інших баз: Лаб. 03 — EF Core поверх `CoursesDb`, Лаб. 04 — MongoDB поверх `feedback_db`.
+Наступна робота додає сервіс для третьої бази: Лаб. 04 — MongoDB поверх `feedback_db`.
