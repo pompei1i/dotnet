@@ -452,6 +452,30 @@ curl -H "X-Correlation-ID: eager-demo" http://localhost:5141/api/courses/1
 curl -H "X-Correlation-ID: explicit-demo" http://localhost:5141/api/categories/1
 ```
 
+### Знімки екрана
+
+Swagger — ендпоінти сервісу Courses:
+
+![Swagger: ендпоінти Categories і Courses сервісу Courses.Api](docs/screenshots/lab03-swagger.png)
+
+Пагінація — `GET /api/courses?page=2&pageSize=5`: на другій сторінці один курс із шести, у тілі `totalCount`, `totalPages`, `hasNext`, `hasPrevious`, ті самі числа — у заголовках `X-Total-Count`, `X-Total-Pages`, `X-Page`, `X-Page-Size`:
+
+![Відповідь 200 з другою сторінкою каталогу та заголовками пагінації](docs/screenshots/lab03-paging.png)
+
+Валідація — `POST /api/courses` зі `"slug": "EF Core!"` і `"level": "Expert"`: FluentValidation повертає 400 у форматі `ValidationProblemDetails`:
+
+![Відповідь 400 з помилками валідації для Slug і Level](docs/screenshots/lab03-validation.png)
+
+Eager Loading — `GET /api/courses/1` (`X-Correlation-ID: eager-demo`): курс, викладач, опис, уроки й категорії приходять одним SQL-запитом з `JOIN`:
+
+![Лог: один Executed DbCommand для eager-demo, початок запиту](docs/screenshots/lab03-eager.png)
+
+![Лог: продовження запиту з LEFT JOIN на CourseDetails, Lessons і CourseCategories та підсумок HTTP 200](docs/screenshots/lab03-eager-2.png)
+
+Explicit Loading — `GET /api/categories/1` (`X-Correlation-ID: explicit-demo`): спершу окремим запитом завантажується категорія, потім другим — її курси з викладачами:
+
+![Лог: два Executed DbCommand для explicit-demo — Categories, потім CourseCategories з JOIN на Courses і Instructors](docs/screenshots/lab03-explicit.png)
+
 ### Docker-образ
 
 ```powershell
