@@ -1,5 +1,12 @@
 <Solution>
   <Folder Name="/Services/" />
+  <Folder Name="/Services/Courses/">
+    <Project Path="Services/Courses/Courses.Api/Courses.Api.csproj" />
+    <Project Path="Services/Courses/Courses.Bll/Courses.Bll.csproj" />
+    <Project Path="Services/Courses/Courses.Dal/Courses.Dal.csproj" />
+    <Project Path="Services/Courses/Courses.Domain/Courses.Domain.csproj" />
+    <Project Path="Services/Courses/Courses.Tests/Courses.Tests.csproj" />
+  </Folder>
   <Folder Name="/Services/Enrollments/">
     <Project Path="Services/Enrollments/Enrollments.Api/Enrollments.Api.csproj" />
     <Project Path="Services/Enrollments/Enrollments.Bll/Enrollments.Bll.csproj" />

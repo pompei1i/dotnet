@@ -19,6 +19,15 @@ builder.AddProject<Projects.Enrollments_Api>("enrollments-api")
     .WithReference(enrollmentsDb)
     .WaitFor(enrollmentsDb);
 
+// Проєкт №2 — сервіс Courses на EF Core. Aspire лише створює порожню базу; схему й дані
+// при старті застосовує сам сервіс: MigrateAsync (міграції Code First) і DbInitializer.
+// Ім'я ресурсу збігається з ConnectionStrings:CoursesDb в appsettings.json сервісу.
+var coursesDb = sql.AddDatabase("CoursesDb");
+
+builder.AddProject<Projects.Courses_Api>("courses-api")
+    .WithReference(coursesDb)
+    .WaitFor(coursesDb);
+
 builder.Build().Run();
 
 // Склеює скрипти Проєкту №1 (db/p1) в один сценарій створення бази.
