@@ -1,0 +1,68 @@
+{
+  "documents": [
+    {
+      "_id": { "$oid": "670000000000000000000101" },
+      "courseId": 1,
+      "courseTitle": "C# для початківців",
+      "author": { "studentId": 1, "displayName": "Олена Коваль" },
+      "rating": 5,
+      "text": "Найзрозуміліший курс для старту: багато практики, кожна тема закріплюється завданням.",
+      "isVerifiedPurchase": true,
+      "photos": ["reviews/101/certificate.jpg", "reviews/101/final-project.png"],
+      "comments": [
+        {
+          "author": { "userId": 1, "role": "instructor", "displayName": "Андрій Мельник" },
+          "text": "Дякую за відгук! Успіхів із наступним курсом.",
+          "createdAt": { "$date": "2026-09-21T08:30:00Z" }
+        },
+        {
+          "author": { "userId": 3, "role": "student", "displayName": "Софія Лисенко" },
+          "text": "Підтверджую, завдання справді корисні.",
+          "createdAt": { "$date": "2026-09-22T17:05:00Z" }
+        }
+      ],
+      "discussionId": { "$oid": "670000000000000000000201" },
+      "createdAt": { "$date": "2026-09-20T19:00:00Z" },
+      "updatedAt": { "$date": "2026-09-22T17:05:00Z" },
+      "isDeleted": false,
+      "version": 3
+    },
+    {
+      "_id": { "$oid": "670000000000000000000102" },
+      "courseId": 1,
+      "courseTitle": "C# для початківців",
+      "author": { "studentId": 3, "displayName": "Софія Лисенко" },
+      "rating": 4,
+      "text": "Добрий курс, але хотілося б більше про асинхронність.",
+      "isVerifiedPurchase": false,
+      "createdAt": { "$date": "2026-10-02T11:20:00Z" },
+      "isDeleted": false,
+      "version": 1
+    },
+    {
+      "_id": { "$oid": "670000000000000000000103" },
+      "courseId": 2,
+      "courseTitle": "ASP.NET Core Web API",
+      "author": { "studentId": 1, "displayName": "Олена Коваль" },
+      "rating": 5,
+      "isVerifiedPurchase": true,
+      "videoUrl": "https://cdn.example.com/reviews/103/review.mp4",
+      "pros": ["Реальний проєкт від початку до кінця", "Розбір типових помилок", "Швидкі відповіді викладача"],
+      "cons": ["Мало про тестування"],
+      "createdAt": { "$date": "2026-10-05T16:45:00Z" },
+      "isDeleted": false,
+      "version": 1
+    },
+    {
+      "_id": { "$oid": "670000000000000000000104" },
+      "courseId": 3,
+      "courseTitle": "Entity Framework Core на практиці",
+      "author": { "studentId": 4, "displayName": "Дмитро Гончар" },
+      "rating": 4,
+      "isVerifiedPurchase": false,
+      "createdAt": { "$date": "2026-10-06T09:10:00Z" },
+      "isDeleted": false,
+      "version": 1
+    }
+  ]
+}

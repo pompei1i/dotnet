@@ -28,6 +28,21 @@ builder.AddProject<Projects.Courses_Api>("courses-api")
     .WithReference(coursesDb)
     .WaitFor(coursesDb);
 
+// Проєкт №3 — сервіс Reviews (Clean Architecture + CQRS + MongoDB). Сталий порт 27017,
+// щоб до бази було зручно підключатися з MongoDB Compass; пароль Aspire генерує сам і
+// зберігає в user-secrets AppHost. Індекси й початкові дані створює сам сервіс під час старту.
+var mongo = builder.AddMongoDB("mongo", port: 27017)
+    .WithDataVolume();
+
+var feedbackDb = mongo.AddDatabase("feedback-db", databaseName: "feedback_db");
+
+// Сервіс читає налаштування з секції MongoDb (IOptions<MongoDbOptions>), тому рядок підключення
+// передається саме в MongoDb__ConnectionString
+builder.AddProject<Projects.Reviews_WebApi>("reviews-api")
+    .WithEnvironment("MongoDb__ConnectionString", feedbackDb)
+    .WithEnvironment("MongoDb__DatabaseName", "feedback_db")
+    .WaitFor(feedbackDb);
+
 builder.Build().Run();
 
 // Склеює скрипти Проєкту №1 (db/p1) в один сценарій створення бази.

@@ -5,6 +5,7 @@
 - **Лабораторна робота №1** — проєктування баз даних для мікросервісної архітектури: три самостійні бази (дві реляційні та одна MongoDB), які разом описують предметну область.
 - **Лабораторна робота №2** — сервіс `Enrollments` на базі Проєкту №1: тришарова архітектура (Web/API → BLL → DAL) на ADO.NET і Dapper з Unit of Work, запуск через .NET Aspire.
 - **Лабораторна робота №3** — сервіс `Courses` на базі Проєкту №2: EF Core Code First, Fluent API, міграції й сідінг, Generic Repository і Unit of Work, специфікації, пагінація, FluentValidation, Serilog. Див. [Сервіс Courses](#сервіс-courses--ef-core-лаб-03).
+- **Лабораторна робота №4** — сервіс `Reviews` на базі Проєкту №3: Clean Architecture з чотирьох шарів, CQRS і MediatR із pipeline behaviors, Value Objects, MongoDB з BsonClassMap, оптимістичною конкурентністю, індексами й сідінгом. Див. [Сервіс Reviews](#сервіс-reviews--clean-architecture-cqrs-mongodb-лаб-04).
 
 ## Предметна область
 
@@ -15,7 +16,7 @@
 | Інструмент | Навіщо |
 |---|---|
 | [.NET 10 SDK](https://dotnet.microsoft.com/download) | збірка й запуск рішення `Platform.slnx` |
-| Docker Desktop (запущений) | .NET Aspire піднімає в ньому контейнер SQL Server |
+| Docker Desktop (запущений) | .NET Aspire піднімає в ньому контейнери SQL Server і MongoDB |
 
 Окремо встановлювати SQL Server, Aspire CLI чи робочі навантаження не потрібно: оркестратор і панель Aspire приходять NuGet-пакетами під час першої збірки.
 
@@ -33,6 +34,7 @@ dotnet run --project Platform.AppHost
 2. Створює базу `EnrollmentsDb` скриптами Лаб. 01 — `db/p1/schema.sql`, `procedures.sql`, `seed.sql`. Скрипти ідемпотентні, тому повторні запуски нічого не дублюють.
 3. Запускає `Enrollments.Api` (ресурс `enrollments-api`) і передає йому рядок підключення змінною оточення `ConnectionStrings__EnrollmentsDb`.
 4. Створює порожню базу `CoursesDb` і запускає `Courses.Api` (ресурс `courses-api`). Під час старту сервіс сам застосовує міграції EF Core і наповнює базу початковими даними.
+5. Запускає контейнер MongoDB (ресурс `mongo`, порт `27017`, том для даних) і `Reviews.WebApi` (ресурс `reviews-api`) з рядком підключення в `MongoDb__ConnectionString`. Сервіс сам створює індекси й додає початкові документи в `feedback_db`.
 
 У консолі з'явиться посилання на **Aspire Dashboard**. У ньому всі ресурси мають бути в статусі `Running`; там же видно адреси API, їхні логи та рядки підключення до баз.
 
@@ -40,6 +42,7 @@ dotnet run --project Platform.AppHost
 |---|---|
 | Enrollments (Лаб. 02) | `http://localhost:5209/swagger` |
 | Courses (Лаб. 03) | `http://localhost:5141/swagger` |
+| Reviews (Лаб. 04) | `http://localhost:5310/swagger` |
 
 За замовчуванням AppHost стартує профілем `http`, якому не потрібен довірений сертифікат розробника. Щоб запустити панель і API по HTTPS, один раз довірте сертифікат і вкажіть профіль явно:
 
@@ -243,7 +246,16 @@ curl -i -X POST http://localhost:5209/api/students \
 dotnet test Platform.slnx
 ```
 
-Тести обох сервісів не потребують ні бази, ні Docker. Для сервісу Courses окремо перевіряються правила сутностей, специфікації (на колекції в пам'яті), валідатори, відповідність моделі EF останній міграції та переклад кожного запиту репозиторіїв у SQL.
+Тести всіх сервісів не потребують ні бази, ні Docker. Для сервісу Courses окремо перевіряються правила сутностей, специфікації (на колекції в пам'яті), валідатори, відповідність моделі EF останній міграції та переклад кожного запиту репозиторіїв у SQL.
+
+Для сервісу Reviews перевіряються:
+- **правило залежностей шарів** — посилання в `*.csproj` і реальні залежності збірок, відсутність `IMongoCollection` у контролерах та обробниках;
+- **бізнес-правила** сутностей і Value Objects;
+- **валідатори**, зокрема асинхронні;
+- **порядок behaviors** і те, що невалідна команда не доходить до обробника;
+- **BSON-мапінг** — структура документа Лаб. 01, читання документа без поля `version`, сід-файли;
+- **готові команди MongoDB** — `$match`, `$sort`, `$skip`, `$limit` та індекси;
+- **API** зі справжнім pipeline MediatR — 201 з `Location`, 400, 404, 409 за `If-Match` і `DuplicateKey`, 503.
 
 Тести не потребують бази даних: unit-тести BLL замінюють репозиторії та Unit of Work підставними об'єктами (перевіряють знімок назви й ціни, відкат транзакції при помилці, доменні винятки), а API-тести піднімають справжній конвеєр ASP.NET Core з підставними сервісами (перевіряють статуси 201, 204, 400, 404, 409, 500, формат ProblemDetails і опис Swagger). Окремий тест перевіряє конфігурацію AutoMapper (`AssertConfigurationIsValid`).
 
@@ -485,6 +497,254 @@ docker run -p 8080:8080 -e ConnectionStrings__CoursesDb="Server=host.docker.inte
 
 Контекст збірки — корінь репозиторію. Образ багатоетапний: SDK лише для збірки, у фінальному — runtime ASP.NET Core і застосунок, запущений не від root.
 
+## Сервіс Reviews — Clean Architecture, CQRS, MongoDB (Лаб. 04)
+
+Сервіс контексту **Feedback** над базою `feedback_db` (Проєкт №3 з Лаб. 01): відгуки студентів про курси з коментарями та теми обговорень. На відміну від тришарових сервісів Лаб. 02–03, доменний шар тут не залежить ні від API, ні від бази.
+
+```mermaid
+flowchart LR
+    client(["HTTP-клієнт, Swagger"]) --> web
+    subgraph Reviews["Services/Reviews"]
+        web["Reviews.WebApi<br/>контролери, ProblemDetails, DI"]
+        app["Reviews.Application<br/>команди, запити, behaviors, валідатори, DTO"]
+        domain["Reviews.Domain<br/>сутності, Value Objects, інтерфейси репозиторіїв"]
+        infra["Reviews.Infrastructure<br/>MongoDbContext, BsonClassMap, репозиторії, індекси, сідінг"]
+    end
+    web --> app
+    web -. "лише реєстрація DI під час старту" .-> infra
+    app --> domain
+    infra --> app
+    infra --> domain
+    infra --> mongo[("feedback_db<br/>MongoDB")]
+```
+
+Правило залежностей: зовнішні шари знають про внутрішні, але не навпаки. Infrastructure лише реалізує інтерфейси, оголошені всередині (`IReviewRepository` у Domain, `IReviewQueries` в Application).
+
+| Проєкт | Що містить | Залежить від |
+|---|---|---|
+| `Reviews.Domain` | `Common/` (`BaseEntity`, `ValueObject`), `Entities/` (`Review`, `Comment`, `Discussion`), `ValueObjects/` (`Author`, `Participant`, `Rating`, `MessagePreview`), `Enums/`, `Exceptions/`, `Interfaces/` (`IReviewRepository`, `IDiscussionRepository`) | лише пакет `MongoDB.Bson` (тип `ObjectId`), без драйвера |
+| `Reviews.Application` | `Common/Behaviors/`, `Common/Interfaces/` (`ICommand`, `IQuery`, `IReviewQueries`), `Common/Models/PagedResult`, `Reviews/Commands/*`, `Reviews/Queries/*`, `Discussions/...`, профілі AutoMapper, `DependencyInjection.cs` | Domain |
+| `Reviews.Infrastructure` | `Persistence/` (`MongoDbContext`, `MongoMappings`, серіалізатори, репозиторії, `ReviewQueries`), `Seeding/` (`IDataSeeder`, сідери, `IndexCreationService`, JSON із даними), `DependencyInjection.cs` | Application, Domain |
+| `Reviews.WebApi` | `Controllers/`, `Contracts/` (тіла HTTP-запитів), `Mapping/`, `ErrorHandling/GlobalExceptionHandler`, `Middleware/`, `Program.cs`, `appsettings.{Environment}.json` | Application, Infrastructure (лише для DI) |
+| `Reviews.Tests` | тести домену, валідаторів, behaviors, обробників, BSON-мапінгу, запитів, архітектури та API | WebApi |
+
+Кожен шар реєструє себе сам — `Program.cs` лише викликає три методи:
+
+```csharp
+builder.Services
+    .AddApplication(builder.Configuration)       // MediatR, behaviors, валідатори
+    .AddInfrastructure(builder.Configuration)    // MongoDB: мапінг, репозиторії, індекси, сідінг, health check
+    .AddWebApi(builder.Configuration);           // контролери, AutoMapper, ProblemDetails, Swagger
+```
+
+### Домен
+
+| Тип | Що забезпечує |
+|---|---|
+| `BaseEntity` | `Id` (`ObjectId`), `CreatedAt`, `UpdatedAt`, `Version` (новий документ — версія 1); сетери захищені |
+| `ValueObject` | порівняння за значеннями компонентів (`GetEqualityComponents`), оператори `==` / `!=` |
+| `Review` | вбудовані масиви `comments`, `photos`, `pros`, `cons` у приватних полях назовні — лише `IReadOnlyList`; методи `Edit`, `AddComment` (не більше 50), `Delete` (м'яке); видалений відгук змінити не можна |
+| `Discussion` | переходи станів: вирішити можна лише відкрите питання, оголошення публікує лише викладач, закріпити можна лише оголошення |
+| `Author`, `Participant`, `Rating`, `MessagePreview` | незмінні, без сетерів, валідація в конструкторі: `new Rating(10)` кидає `DomainException` ще до будь-якого звернення до бази |
+
+### CQRS із MediatR
+
+Кожна операція API — окрема команда або запит з власним обробником. Команди змінюють дані через `IReviewRepository`. Запити читають через `IReviewQueries`, реалізація якого повертає з MongoDB одразу DTO. Жоден контролер чи обробник не звертається до `IMongoCollection` — це перевіряє архітектурний тест.
+
+| Тип | Команди | Запити |
+|---|---|---|
+| Відгуки | `CreateReview`, `UpdateReview`, `DeleteReview`, `AddComment` | `GetReviewById`, `GetReviewsList`, `GetCourseRating` |
+| Теми | `CreateDiscussion`, `ChangeDiscussionStatus` | `GetDiscussionById`, `GetDiscussionsList` |
+
+Кожна папка (`Reviews/Commands/CreateReview/` тощо) містить команду, обробник і валідатор.
+
+Кожен запит проходить через ланцюжок behaviors; порядок задає `AddOpenBehavior` у `AddApplication`:
+
+```text
+контролер -> ISender.Send -> LoggingBehavior -> ValidationBehavior -> PerformanceBehavior -> обробник -> репозиторій -> MongoDB
+```
+
+| Behavior | Що робить |
+|---|---|
+| `LoggingBehavior` | структурований запис «Handling {RequestName} {@Request}», потім «Handled ... in N ms» або «failed ... with {ExceptionType}» |
+| `ValidationBehavior` | запускає всі валідатори FluentValidation, збирає помилки разом і кидає `ValidationException` — обробник не викликається |
+| `PerformanceBehavior` | міряє час самого обробника разом із запитами до MongoDB; попередження, якщо довше за `Application:SlowRequestThresholdMs` (500 мс) |
+
+Валідатори перевіряють і MongoDB-специфічне:
+- **Формат Id.** Рядок має бути коректним `ObjectId` (`ObjectId.TryParse`).
+- **Один відгук від студента на курс.** Асинхронне правило `CreateReviewCommandValidator` робить запит до MongoDB.
+- **`sourceReviewId` нової теми** має вказувати на наявний відгук того самого курсу.
+
+Як виглядає в лозі команда з `Rating = 10`:
+
+```text
+[19:04:17 INF] Reviews.Application.Common.Behaviors.LoggingBehavior
+  Handling CreateReviewCommand {"CourseId": 4, "CourseTitle": "DevOps для .NET-розробника", "StudentId": 257268, ..., "Rating": 10, ...}
+[19:04:17 WRN] Reviews.Application.Common.Behaviors.LoggingBehavior
+  CreateReviewCommand failed after 14 ms with ValidationException: Validation failed:
+ -- Rating: 'Rating' must be between 1 and 5. You entered 10. Severity: Error
+[19:04:17 INF] Serilog.AspNetCore.RequestLoggingMiddleware
+  HTTP POST /api/reviews responded 400 in 52.2197 ms {"CorrelationId": "rating-10-demo", ...}
+```
+
+Записів обробника («Review ... created») і `PerformanceBehavior` немає: до обробника запит не дійшов. Єдина команда до MongoDB тут — пошук дубліката в асинхронному правилі валідатора. Для порівняння, успішна команда додає записи `Handler CreateReviewCommand executed in N ms` і `Review {ReviewId} created`.
+
+### MongoDB
+
+**Мапінг.** `MongoMappings.Register()` налаштовує `BsonClassMap` один раз під час старту, ще до першого звернення до бази. У доменних класах немає жодного BSON-атрибута. Документ має ту саму структуру, що в Лаб. 01:
+
+- **Імена полів** у camelCase (`CamelCaseElementNameConvention`). Поля, яких немає в класі, ігноруються (`IgnoreExtraElementsConvention`).
+- **Значення null не записуються** (`IgnoreIfNullConvention`), порожні масиви теж. Тож відгук «лише оцінка» не має полів `text` чи `comments`, як і вимагає гнучка схема.
+- **Приватні поля** `_comments`, `_photos`, `_pros`, `_cons` і `_tags` записуються як `comments`, `photos`, `pros`, `cons` і `tags`.
+- **Value Objects** створюються через конструктор (`MapCreator`), тож валідація спрацьовує й під час читання. `Rating` зберігається звичайним числом (`RatingSerializer`).
+- **Перерахування** зберігаються рядками в нижньому регістрі: `"student"`, `"open"`.
+- **Сутності** створюються з бази приватним конструктором без параметрів. Стандартну конвенцію `ImmutableTypeClassMapConvention` для них вимкнено, бо інакше драйвер обирав би публічний конструктор з бізнес-валідацією.
+
+Документ відгуку, записаний сервісом:
+
+```json
+{
+  "_id": ObjectId("670000000000000000000101"),
+  "createdAt": ISODate("2026-09-20T19:00:00Z"),
+  "updatedAt": ISODate("2026-09-22T17:05:00Z"),
+  "version": 3,
+  "courseId": Long(1),
+  "courseTitle": "C# для початківців",
+  "author": { "studentId": Long(1), "displayName": "Олена Коваль" },
+  "rating": 5,
+  "text": "Найзрозуміліший курс для старту: ...",
+  "isVerifiedPurchase": true,
+  "discussionId": ObjectId("670000000000000000000201"),
+  "isDeleted": false,
+  "comments": [
+    { "author": { "userId": Long(1), "role": "instructor", "displayName": "Андрій Мельник" },
+      "text": "Дякую за відгук! ...", "createdAt": ISODate("2026-09-21T08:30:00Z") }
+  ],
+  "photos": ["reviews/101/certificate.jpg", "reviews/101/final-project.png"]
+}
+```
+
+Документи, які записує сервіс, проходять валідатори `$jsonSchema` з `db/p3/collections.js`. Це перевірено наживо: скрипт Лаб. 01 застосовано до бази сервісу, і всі сценарії запису пройшли.
+
+**Оптимістична конкурентність.** Оновлення — це один атомарний `ReplaceOne` з фільтром `{ _id, version: <очікувана> }`, і версія при цьому зростає на 1. Якщо документ тим часом змінив хтось інший, фільтр нічого не знаходить, і обробник отримує `ConflictException` (409). Клієнт отримує версію в заголовку `ETag` і повертає її в `If-Match`. Застарілу версію з `If-Match` відхиляє вже обробник, ще до зміни сутності. Теми, створені скриптом Лаб. 01, не мають поля `version`; для них фільтр приймає і `version: 1`, і відсутнє поле.
+
+**Читання.** Список — це один aggregation pipeline: спершу `$match` (фільтр, `$text`-пошук), потім `$facet` з двома гілками. Перша дає сторінку: `$sort`, `$skip`, `$limit` і `$project`, де `$toString` перетворює `_id` на рядок, а `$size` рахує коментарі. Друга, `$count`, дає загальну кількість. Сервер повертає вже готову форму DTO, а сервіс лише десеріалізує її в record. Рейтинг курсу рахує `$group` із `$avg` і кількістю відгуків на кожну оцінку.
+
+**Індекси** створює `IndexCreationService` під час старту. Назви й параметри ті самі, що в `db/p3/collections.js`, тож скрипт і сервіс не конфліктують, а повторне створення наявного індексу MongoDB пропускає.
+
+| Колекція | Індекс | Навіщо |
+|---|---|---|
+| `reviews` | `ix_reviews_course_createdAt` `{ courseId: 1, createdAt: -1 }` | відгуки курсу, найновіші перші |
+| `reviews` | `ux_reviews_course_student` `{ courseId: 1, "author.studentId": 1 }`, унікальний | один відгук студента на курс |
+| `reviews` | `ix_reviews_student` `{ "author.studentId": 1 }` | відгуки студента |
+| `reviews` | `ix_reviews_discussion` `{ discussionId: 1 }`, частковий | відгук, з якого виросла тема |
+| `reviews` | `ix_reviews_text` `{ text: "text" }` | повнотекстовий пошук `?search=` |
+| `discussions` | `ix_discussions_course_status_updatedAt` | теми курсу за станом, спершу активні |
+| `discussions` | `ix_discussions_tags` (multikey) | теми за тегом |
+| `discussions` | `ix_discussions_title_text` | пошук по заголовках |
+
+**Сідінг.** `ReviewSeeder` і `DiscussionSeeder` (`IDataSeeder`) читають документи з `Seeding/Data/*.json` у форматі Extended JSON. Це ті самі документи, що в `db/p3/seed.js`, зі сталими `_id`. Сідер одним запитом з'ясовує, які `_id` уже є в базі, і вставляє решту одним `InsertManyAsync`. Повторний старт пише в лог `Seeding reviews: 0 inserted, 4 already present`.
+
+**Конфігурація.** Секція `MongoDb` (`MongoDbOptions` через `IOptions`, перевіряється під час старту). Пул з'єднань і таймаути задаються параметрами рядка підключення.
+
+| Файл | Рядок підключення | Сідінг |
+|---|---|---|
+| `appsettings.json` | `localhost:27017`, `maxPoolSize=50`, `serverSelectionTimeoutMS=5000` | так |
+| `appsettings.Development.json` | `localhost:27017`, коротші таймаути (3 с) | так |
+| `appsettings.Staging.json` | `mongo-staging`, база `feedback_db_staging` | так |
+| `appsettings.Production.json` | replica set із трьох вузлів, `w=majority`, `retryWrites=true` | ні |
+
+Під Aspire рядок підключення приходить змінною оточення `MongoDb__ConnectionString`. Стан бази показує `GET /health` — health check `AspNetCore.HealthChecks.MongoDb`.
+
+### Помилки
+
+`GlobalExceptionHandler` (`IExceptionHandler` + `AddProblemDetails`) перетворює винятки на ProblemDetails. До кожної відповіді додаються `traceId` і `correlationId`.
+
+| Виняток | Статус |
+|---|---|
+| `ValidationException` (FluentValidation) | 400, `ValidationProblemDetails` з усіма помилками, згрупованими за полем |
+| `DomainException` | 400 |
+| `NotFoundException` | 404 |
+| `ConflictException` (застаріла версія) | 409 |
+| `MongoWriteException` з `DuplicateKey` (унікальний індекс) | 409 |
+| інший `MongoWriteException` (наприклад, документ не пройшов `$jsonSchema`) | 400 |
+| `MongoConnectionException`, тайм-аут вибору сервера | 503 із заголовком `Retry-After` |
+| усе інше | 500 |
+
+Тексти винятків драйвера містять адреси серверів і дані документів, тому назовні вони йдуть лише в Development.
+
+Повторний відгук того самого студента відхиляється двома способами. Зазвичай це робить асинхронний валідатор: 400 з помилкою `StudentId`. Якщо два однакові запити прийшли одночасно, обидва можуть пройти валідатор, і тоді другий відсікає унікальний індекс: 409 `Duplicate key`. Наживо з 12 одночасних однакових запитів вийшло 1 × 201, 6 × 400 і 5 × 409.
+
+### API сервісу Reviews
+
+| Метод і шлях | Що робить | Успіх |
+|---|---|---|
+| `GET /api/reviews?courseId=&studentId=&minRating=&search=&sortBy=&sortDir=&page=&pageSize=` | список відгуків | 200 + `X-Total-Count`, `X-Total-Pages` |
+| `GET /api/reviews/{id}` | відгук із коментарями | 200 + `ETag` |
+| `POST /api/reviews` | новий відгук | 201 + `Location: /api/reviews/{ObjectId}` |
+| `PUT /api/reviews/{id}` + `If-Match` | зміна оцінки, тексту, переваг, недоліків | 200 + новий `ETag` |
+| `DELETE /api/reviews/{id}` + `If-Match` | м'яке видалення | 204 |
+| `POST /api/reviews/{id}/comments` | коментар у вбудований масив | 201 |
+| `GET /api/courses/{courseId}/rating` | середня оцінка й розподіл (aggregation) | 200 |
+| `GET /api/discussions?courseId=&status=&tag=&search=&page=&pageSize=` | теми | 200 |
+| `GET /api/discussions/{id}` | тема | 200 + `ETag` |
+| `POST /api/discussions` | нова тема (питання чи оголошення) | 201 |
+| `PUT /api/discussions/{id}/status` + `If-Match` | `open` / `resolved` / `closed` | 200 |
+| `GET /health` | стан підключення до MongoDB | 200 / 503 |
+
+Swagger: `http://localhost:5310/swagger`.
+
+### Приклади запитів
+
+```bash
+# відгуки курсу 1, друга сторінка по одному
+curl -i "http://localhost:5310/api/reviews?courseId=1&page=2&pageSize=1"
+
+# повнотекстовий пошук і рейтинг курсу
+curl "http://localhost:5310/api/reviews?search=асинхронність"
+curl "http://localhost:5310/api/courses/1/rating"
+
+# Rating = 10 -> 400 ще до обробника; X-Correlation-ID допомагає знайти записи в лозі
+curl -i -X POST http://localhost:5310/api/reviews -H "Content-Type: application/json" \
+  -H "X-Correlation-ID: rating-10-demo" \
+  -d '{"courseId":4,"courseTitle":"DevOps для .NET-розробника","studentId":10,"authorName":"Тарас","rating":10}'
+
+# новий відгук -> 201, Location з рядковим ObjectId, ETag: "1"
+curl -i -X POST http://localhost:5310/api/reviews -H "Content-Type: application/json" \
+  -d '{"courseId":4,"courseTitle":"DevOps для .NET-розробника","studentId":10,"authorName":"Тарас","rating":5,"text":"Docker без зайвої теорії"}'
+
+# той самий студент і курс ще раз -> 400 (асинхронне правило з запитом до MongoDB)
+
+# конфлікт версій: перша зміна з If-Match "1" -> 200 і ETag "2"; друга з тим самим "1" -> 409
+curl -i -X PUT http://localhost:5310/api/reviews/<id> -H "Content-Type: application/json" -H 'If-Match: "1"' -d '{"rating":4}'
+curl -i -X PUT http://localhost:5310/api/reviews/<id> -H "Content-Type: application/json" -H 'If-Match: "1"' -d '{"rating":3}'
+
+# некоректний ObjectId -> 400, неіснуючий -> 404
+curl -i http://localhost:5310/api/reviews/123
+curl -i http://localhost:5310/api/reviews/6700000000000000000009ff
+```
+
+### MongoDB Compass і перевірка індексів
+
+Під Aspire MongoDB слухає сталий порт `27017`. Користувач — `admin`. Пароль видно в Aspire Dashboard: вкладка **Parameters**, параметр `mongo-password`.
+
+- **Compass.** Рядок підключення — `mongodb://admin:<пароль>@localhost:27017/?authSource=admin`. Далі база `feedback_db` → колекція `reviews`; індекси показує вкладка **Indexes**.
+- **mongosh.** Він вбудований у Compass (панель `_MONGOSH` унизу) і є в контейнері:
+
+```powershell
+docker ps --filter "name=mongo"     # ім'я контейнера, наприклад mongo-abcd1234
+docker exec -it <контейнер> mongosh -u admin -p <пароль> --authenticationDatabase admin feedback_db --eval "db.reviews.getIndexes()"
+```
+
+### Запуск без Aspire
+
+```powershell
+docker run -d --name feedback-mongo -p 27017:27017 mongo:8.0
+dotnet run --project Services/Reviews/Reviews.WebApi
+```
+
+Рядок підключення з `appsettings.Development.json` (`mongodb://localhost:27017`) підійде без змін. Індекси й дані сервіс створить сам. Можна також спершу виконати `db/p3/collections.js` і `seed.js` з Лаб. 01 — сервіс і скрипти не конфліктують.
+
 ## Контексти та бази даних
 
 Систему поділено на три незалежні контексти (Bounded Contexts). Кожен має власну базу; кожна сутність належить рівно одному контексту.
@@ -679,6 +939,12 @@ Services/
     Courses.Dal/           DbContext, Configurations/, Migrations/, репозиторії, Unit of Work, Seeding/
     Courses.Domain/        сутності з бізнес-правилами, доменні винятки
     Courses.Tests/         тести домену, специфікацій, валідаторів, сервісів, моделі EF та API
+  Reviews/                 Проєкт №3 — Clean Architecture + CQRS + MongoDB
+    Reviews.Domain/        сутності, value objects, перерахування, доменні винятки, інтерфейси репозиторіїв
+    Reviews.Application/   Commands/, Queries/, Common/Behaviors/, валідатори, DTO, профілі AutoMapper
+    Reviews.Infrastructure/ Persistence/ (Mongo-контекст, BSON-мапінг, репозиторії, читання), Seeding/
+    Reviews.WebApi/        контролери, Program.cs, обробка помилок, appsettings.{Environment}.json
+    Reviews.Tests/         тести домену, behaviors, BSON-мапінгу, запитів, архітектури та API
 dotnet-tools.json          локальний інструмент dotnet-ef
 docs/
   contexts.md              контексти, агрегати, обґрунтування рішень
@@ -827,4 +1093,4 @@ EXEC dbo.usp_ChangeOrderStatus @OrderId = 3, @NewStatus = N'AccessGranted';
 
 ## Що далі
 
-Наступна робота додає сервіс для третьої бази: Лаб. 04 — MongoDB поверх `feedback_db`.
+Усі три бази тепер мають власні сервіси. Наступна робота — Лаб. 05.

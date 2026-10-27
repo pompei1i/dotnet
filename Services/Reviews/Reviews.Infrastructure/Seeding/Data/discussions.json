@@ -1,0 +1,60 @@
+{
+  "documents": [
+    {
+      "_id": { "$oid": "670000000000000000000201" },
+      "courseId": 1,
+      "courseTitle": "C# для початківців",
+      "title": "Чи достатньо цього курсу, щоб перейти до ASP.NET Core?",
+      "type": "question",
+      "author": { "userId": 3, "role": "student", "displayName": "Софія Лисенко" },
+      "status": "resolved",
+      "tags": ["csharp", "навчальний-план"],
+      "messagesCount": 3,
+      "lastMessage": {
+        "messageId": { "$oid": "670000000000000000000303" },
+        "authorName": "Олена Коваль",
+        "textPreview": "Я так і зробила: після модуля про класи взяла курс про Web API.",
+        "createdAt": { "$date": "2026-09-24T09:15:00Z" }
+      },
+      "acceptedAnswerId": { "$oid": "670000000000000000000302" },
+      "sourceReviewId": { "$oid": "670000000000000000000101" },
+      "createdAt": { "$date": "2026-09-23T10:00:00Z" },
+      "updatedAt": { "$date": "2026-09-24T09:15:00Z" },
+      "version": 1
+    },
+    {
+      "_id": { "$oid": "670000000000000000000202" },
+      "courseId": 3,
+      "courseTitle": "Entity Framework Core на практиці",
+      "title": "Помилка під час застосування міграції",
+      "type": "question",
+      "author": { "userId": 2, "role": "student", "displayName": "Максим Ткаченко" },
+      "status": "open",
+      "tags": ["ef-core", "migrations"],
+      "messagesCount": 2,
+      "lastMessage": {
+        "messageId": { "$oid": "670000000000000000000305" },
+        "authorName": "Ірина Шевченко",
+        "textPreview": "Рядок підключення береться з проєкту запуску — вкажіть його параметром.",
+        "createdAt": { "$date": "2026-10-04T13:40:00Z" }
+      },
+      "createdAt": { "$date": "2026-10-04T12:05:00Z" },
+      "updatedAt": { "$date": "2026-10-04T13:40:00Z" },
+      "version": 1
+    },
+    {
+      "_id": { "$oid": "670000000000000000000203" },
+      "courseId": 5,
+      "courseTitle": "Мікросервіси на .NET Aspire",
+      "title": "Оновлення програми курсу: додано модуль про спостережуваність",
+      "type": "announcement",
+      "author": { "userId": 3, "role": "instructor", "displayName": "Тарас Бондаренко" },
+      "status": "closed",
+      "messagesCount": 0,
+      "isPinned": true,
+      "createdAt": { "$date": "2026-10-01T08:00:00Z" },
+      "updatedAt": { "$date": "2026-10-01T08:00:00Z" },
+      "version": 1
+    }
+  ]
+}
