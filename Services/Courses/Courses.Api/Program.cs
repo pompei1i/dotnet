@@ -1,5 +1,4 @@
 using Courses.Api.Controllers;
-using Courses.Api.Middleware;
 using Courses.Bll.Mapping;
 using Courses.Bll.Services;
 using Courses.Bll.Validation;
@@ -7,22 +6,18 @@ using Courses.Dal;
 using Courses.Dal.Seeding;
 using FluentValidation;
 using Microsoft.EntityFrameworkCore;
+using Platform.ServiceDefaults;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Спільні налаштування платформи (Лаб. 05): Serilog, OpenTelemetry, health checks, service discovery
+builder.AddServiceDefaults();
 
 // Рядок підключення лежить в appsettings.json і перевизначається змінною оточення
 // ConnectionStrings__CoursesDb — саме так його передає .NET Aspire (Platform.AppHost).
 var connectionString = builder.Configuration.GetConnectionString("CoursesDb")
     ?? throw new InvalidOperationException("Connection string 'CoursesDb' is missing");
-
-// Логування: рівні, sinks (консоль і файл) та збагачення задано в appsettings.json, розділ "Serilog".
-// Там же Microsoft.EntityFrameworkCore.Database.Command = Information — у лозі видно SQL кожного запиту.
-builder.Host.UseSerilog((context, services, configuration) => configuration
-    .ReadFrom.Configuration(context.Configuration)
-    .ReadFrom.Services(services)
-    .Enrich.FromLogContext()
-    .Enrich.WithProperty("Application", "Courses.Api"));
 
 // DAL: DbContext і Unit of Work — Scoped, один контекст на HTTP-запит
 builder.Services.AddDbContext<CoursesDbContext>(options => options.UseSqlServer(connectionString));
@@ -80,8 +75,8 @@ if (app.Configuration.GetValue("Database:MigrateOnStartup", true))
     }
 }
 
-// CorrelationId стоїть першим, щоб його бачили всі логи запиту, зокрема лог обробника помилок
-app.UseMiddleware<CorrelationIdMiddleware>();
+// CorrelationId з ServiceDefaults стоїть першим, щоб його бачили всі логи запиту, зокрема лог обробника помилок
+app.UseCorrelationId();
 
 // У .NET 10 middleware сам не логує винятки, які обробив IExceptionHandler, —
 // тож кожен виняток потрапляє в лог рівно один раз, з DomainExceptionHandler
@@ -100,6 +95,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapControllers();
+app.MapDefaultEndpoints();   // /health і /alive
 
 app.Run();
 

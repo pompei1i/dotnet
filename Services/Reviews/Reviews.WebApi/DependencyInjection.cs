@@ -1,5 +1,5 @@
 using Reviews.WebApi.ErrorHandling;
-using Reviews.WebApi.Middleware;
+using Platform.ServiceDefaults;
 
 namespace Reviews.WebApi;
 

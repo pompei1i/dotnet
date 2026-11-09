@@ -1,47 +1,78 @@
+// AppHost — лише оркестрація під час розробки: які ресурси запустити, як їх зв'язати й у якому
+// порядку стартувати. Бізнес-логіки тут немає, а сервіси про AppHost не знають (посилання — лише звідси).
 var builder = DistributedApplication.CreateBuilder(args);
 
-// SQL Server у контейнері. Том зберігає дані між запусками; пароль sa Aspire генерує сам
-// і запам'ятовує в user-secrets цього проєкту.
-var sql = builder.AddSqlServer("sql")
+// ---------- Бази даних (контейнери Docker) ----------
+
+// Пароль sa — параметр-секрет: значення лежить у user-secrets AppHost (Parameters:sql-password),
+// у коді й репозиторії його немає. Якщо секрету ще немає, Dashboard попросить ввести його під час запуску.
+var sqlPassword = builder.AddParameter("sql-password", secret: true);
+
+// SQL Server; том зберігає дані між перезапусками (без WithDataVolume бази зникали б щоразу)
+var sql = builder.AddSqlServer("sql", sqlPassword)
     .WithDataVolume();
 
-// Ім'я ресурсу бази збігається з ім'ям рядка підключення в appsettings.json сервісу
-// (ConnectionStrings:EnrollmentsDb), тому Aspire передає його в API автоматично —
-// змінною оточення ConnectionStrings__EnrollmentsDb, без змін у коді Enrollments.Api.
-// Базу створюють скрипти Лаб. 01: вони ідемпотентні, тож повторні запуски безпечні.
+// Ім'я ресурсу бази = ім'я рядка підключення, який сервіс уже читає (ConnectionStrings:EnrollmentsDb).
+// Aspire передає його змінною ConnectionStrings__EnrollmentsDb — код сервісу не змінюється.
+// Базу Проєкту №1 створюють скрипти Лаб. 01: вони ідемпотентні, тож повторні запуски безпечні.
 var enrollmentsDb = sql.AddDatabase("EnrollmentsDb")
     .WithCreationScript(ReadDatabaseScripts("schema.sql", "procedures.sql", "seed.sql"));
 
-// Варіант без контейнера — уже розгорнута база з Лаб. 01 (рядок підключення в appsettings.json AppHost):
-// var enrollmentsDb = builder.AddConnectionString("EnrollmentsDb");
-
-builder.AddProject<Projects.Enrollments_Api>("enrollments-api")
-    .WithReference(enrollmentsDb)
-    .WaitFor(enrollmentsDb);
-
-// Проєкт №2 — сервіс Courses на EF Core. Aspire лише створює порожню базу; схему й дані
-// при старті застосовує сам сервіс: MigrateAsync (міграції Code First) і DbInitializer.
-// Ім'я ресурсу збігається з ConnectionStrings:CoursesDb в appsettings.json сервісу.
+// Проєкт №2 — порожня база; схему й дані при старті застосовує сам Courses.Api (міграції EF Core + сідінг)
 var coursesDb = sql.AddDatabase("CoursesDb");
 
-builder.AddProject<Projects.Courses_Api>("courses-api")
-    .WithReference(coursesDb)
-    .WaitFor(coursesDb);
-
-// Проєкт №3 — сервіс Reviews (Clean Architecture + CQRS + MongoDB). Сталий порт 27017,
-// щоб до бази було зручно підключатися з MongoDB Compass; пароль Aspire генерує сам і
-// зберігає в user-secrets AppHost. Індекси й початкові дані створює сам сервіс під час старту.
+// MongoDB — окремий том. Сталий порт 27017 — щоб підключатися з MongoDB Compass; пароль — секрет
+// Parameters:mongo-password у user-secrets AppHost
 var mongo = builder.AddMongoDB("mongo", port: 27017)
     .WithDataVolume();
 
-var feedbackDb = mongo.AddDatabase("feedback-db", databaseName: "feedback_db");
+// Проєкт №3: ресурс FeedbackDb (рядок ConnectionStrings:FeedbackDb), сама база в MongoDB — feedback_db
+var feedbackDb = mongo.AddDatabase("FeedbackDb", databaseName: "feedback_db");
 
-// Сервіс читає налаштування з секції MongoDb (IOptions<MongoDbOptions>), тому рядок підключення
-// передається саме в MongoDb__ConnectionString
-builder.AddProject<Projects.Reviews_WebApi>("reviews-api")
-    .WithEnvironment("MongoDb__ConnectionString", feedbackDb)
-    .WithEnvironment("MongoDb__DatabaseName", "feedback_db")
-    .WaitFor(feedbackDb);
+// ---------- Мікросервіси (Лаб. 02–04) ----------
+// Ім'я ресурсу (enrollments-api...) — логічне ім'я для service discovery: Gateway й Aggregator
+// звертаються на http://enrollments-api, а не на localhost:порт. Порти Aspire призначає сам.
+// WithReference — передати рядок підключення / адресу; WaitFor — не стартувати, доки залежність не готова.
+// WithHttpHealthCheck — «готовий» означає, що /health відповідає (міграції, індекси вже застосовано).
+
+var enrollments = builder.AddProject<Projects.Enrollments_Api>("enrollments-api")
+    .WithReference(enrollmentsDb)
+    .WaitFor(enrollmentsDb)
+    .WithHttpHealthCheck("/health");
+
+var courses = builder.AddProject<Projects.Courses_Api>("courses-api")
+    .WithReference(coursesDb)
+    .WaitFor(coursesDb)
+    .WithHttpHealthCheck("/health");
+
+var reviews = builder.AddProject<Projects.Reviews_WebApi>("reviews-api")
+    .WithReference(feedbackDb)
+    .WaitFor(feedbackDb)
+    .WithHttpHealthCheck("/health");
+
+// ---------- Нові компоненти платформи (Лаб. 05) ----------
+
+// Aggregator паралельно опитує всі три сервіси, тож отримує посилання на кожен
+var aggregator = builder.AddProject<Projects.Platform_Aggregator>("aggregator")
+    .WithReference(enrollments)
+    .WithReference(courses)
+    .WithReference(reviews)
+    .WaitFor(enrollments)
+    .WaitFor(courses)
+    .WaitFor(reviews)
+    .WithHttpHealthCheck("/health");
+
+// Gateway — єдина точка входу з фіксованим портом 5000. Посилання на всі сервіси й Aggregator
+// потрібні YARP для маршрутизації. Порядок старту: БД -> сервіси -> Aggregator -> Gateway.
+builder.AddProject<Projects.Platform_ApiGateway>("gateway")
+    .WithHttpEndpoint(port: 5000, name: "public")
+    .WithReference(enrollments)
+    .WithReference(courses)
+    .WithReference(reviews)
+    .WithReference(aggregator)
+    .WaitFor(aggregator)
+    .WithHttpHealthCheck("/health")
+    .WithExternalHttpEndpoints();
 
 builder.Build().Run();
 

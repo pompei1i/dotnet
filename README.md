@@ -6,6 +6,7 @@
 - **Лабораторна робота №2** — сервіс `Enrollments` на базі Проєкту №1: тришарова архітектура (Web/API → BLL → DAL) на ADO.NET і Dapper з Unit of Work, запуск через .NET Aspire.
 - **Лабораторна робота №3** — сервіс `Courses` на базі Проєкту №2: EF Core Code First, Fluent API, міграції й сідінг, Generic Repository і Unit of Work, специфікації, пагінація, FluentValidation, Serilog. Див. [Сервіс Courses](#сервіс-courses--ef-core-лаб-03).
 - **Лабораторна робота №4** — сервіс `Reviews` на базі Проєкту №3: Clean Architecture з чотирьох шарів, CQRS і MediatR із pipeline behaviors, Value Objects, MongoDB з BsonClassMap, оптимістичною конкурентністю, індексами й сідінгом. Див. [Сервіс Reviews](#сервіс-reviews--clean-architecture-cqrs-mongodb-лаб-04).
+- **Лабораторна робота №5** — мікросервісна платформа на .NET Aspire: спільні `ServiceDefaults` (Serilog, OpenTelemetry, CorrelationId), API Gateway на YARP, Aggregator із паралельними викликами й частковими відмовами, трасування й логи всіх сервісів в Aspire Dashboard. Див. [Платформа](#платформа-servicedefaults-api-gateway-aggregator-лаб-05).
 
 ## Предметна область
 
@@ -22,7 +23,7 @@
 
 ## Запуск через .NET Aspire
 
-Одна команда з кореня репозиторію піднімає базу даних і API разом:
+Одна команда з кореня репозиторію піднімає бази даних, три сервіси, Aggregator і Gateway разом:
 
 ```powershell
 dotnet run --project Platform.AppHost
@@ -30,11 +31,12 @@ dotnet run --project Platform.AppHost
 
 Що відбувається:
 
-1. Aspire запускає контейнер SQL Server (ресурс `sql`) з томом для даних.
+1. Aspire запускає контейнер SQL Server (ресурс `sql`) з томом для даних; пароль `sa` — параметр-секрет `sql-password`.
 2. Створює базу `EnrollmentsDb` скриптами Лаб. 01 — `db/p1/schema.sql`, `procedures.sql`, `seed.sql`. Скрипти ідемпотентні, тому повторні запуски нічого не дублюють.
 3. Запускає `Enrollments.Api` (ресурс `enrollments-api`) і передає йому рядок підключення змінною оточення `ConnectionStrings__EnrollmentsDb`.
 4. Створює порожню базу `CoursesDb` і запускає `Courses.Api` (ресурс `courses-api`). Під час старту сервіс сам застосовує міграції EF Core і наповнює базу початковими даними.
-5. Запускає контейнер MongoDB (ресурс `mongo`, порт `27017`, том для даних) і `Reviews.WebApi` (ресурс `reviews-api`) з рядком підключення в `MongoDb__ConnectionString`. Сервіс сам створює індекси й додає початкові документи в `feedback_db`.
+5. Запускає контейнер MongoDB (ресурс `mongo`, порт `27017`, том для даних) і `Reviews.WebApi` (ресурс `reviews-api`) з рядком підключення `ConnectionStrings__FeedbackDb`. Сервіс сам створює індекси й додає початкові документи в `feedback_db`.
+6. Коли всі три сервіси відповідають на `/health`, запускає `Platform.Aggregator` (ресурс `aggregator`), а потім `Platform.ApiGateway` (ресурс `gateway`) на порту **5000** — єдиній точці входу для клієнтів. Докладно — [Платформа (Лаб. 05)](#платформа-servicedefaults-api-gateway-aggregator-лаб-05).
 
 У консолі з'явиться посилання на **Aspire Dashboard**. У ньому всі ресурси мають бути в статусі `Running`; там же видно адреси API, їхні логи та рядки підключення до баз.
 
@@ -43,6 +45,8 @@ dotnet run --project Platform.AppHost
 | Enrollments (Лаб. 02) | `http://localhost:5209/swagger` |
 | Courses (Лаб. 03) | `http://localhost:5141/swagger` |
 | Reviews (Лаб. 04) | `http://localhost:5310/swagger` |
+| Aggregator (Лаб. 05) | `http://localhost:5055/swagger` |
+| **Gateway** (Лаб. 05) — усі API через одну адресу | `http://localhost:5000/api/...` |
 
 За замовчуванням AppHost стартує профілем `http`, якому не потрібен довірений сертифікат розробника. Щоб запустити панель і API по HTTPS, один раз довірте сертифікат і вкажіть профіль явно:
 
@@ -284,7 +288,7 @@ flowchart TD
 | `Courses.Domain` | 6 сутностей із приватними setter-ами: `Course`, `CourseDetail`, `Lesson`, `Category`, `CourseCategory`, `Instructor`; 4 доменні винятки |
 | `Courses.Dal` | `CoursesDbContext`, `Configurations/` (по класу на сутність), `Migrations/`, Generic Repository, 4 специфічні репозиторії, `UnitOfWork`, `Seeding/DbInitializer` |
 | `Courses.Bll` | 3 сервіси, DTO, профілі AutoMapper, `Specifications/`, `Validation/` (FluentValidation) |
-| `Courses.Api` | 3 контролери, `DomainExceptionHandler`, `CorrelationIdMiddleware`, `Program.cs`, `Dockerfile` |
+| `Courses.Api` | 3 контролери, `DomainExceptionHandler`, `Program.cs`, `Dockerfile` (`CorrelationIdMiddleware` з Лаб. 05 — спільний, у `Platform.ServiceDefaults`) |
 | `Courses.Tests` | 68 тестів без бази даних |
 
 ### Модель і Fluent API
@@ -390,13 +394,13 @@ dotnet dotnet-ef migrations script --idempotent --project Services/Courses/Cours
 
 ### Логування (Serilog)
 
-Конфігурація — розділ `Serilog` в `Courses.Api/appsettings.json`; рівні перевизначаються в `appsettings.Development.json` або змінними оточення (`Serilog__MinimumLevel__Default=Warning`).
+Із Лаб. 05 основну конфігурацію Serilog (консоль у CompactJson, збагачення, передача в OpenTelemetry) задає `Platform.ServiceDefaults` — див. [ServiceDefaults](#servicedefaults); тут лишилися файловий sink і рівні. Конфігурація — розділ `Serilog` в `Courses.Api/appsettings.json`; рівні перевизначаються в `appsettings.Development.json` або змінними оточення (`Serilog__MinimumLevel__Default=Warning`).
 
 | Що | Як |
 |---|---|
-| sinks | консоль і файл `logs/courses-api-<дата>.json` (JSON, по файлу на день, 7 днів) |
+| sinks | консоль (з ServiceDefaults) і файл `logs/courses-api-<дата>.json` (JSON, по файлу на день, 7 днів) |
 | рівні | `Information`; `Microsoft.AspNetCore` і `Microsoft.EntityFrameworkCore` — `Warning`; `Microsoft.EntityFrameworkCore.Database.Command` — `Information`, тож у лозі видно SQL кожного запиту |
-| властивості | `CorrelationId` (із заголовка `X-Correlation-ID` або згенерований, повертається у відповіді), `RequestPath`, `UserId`, `SourceContext`, `Application` |
+| властивості | `CorrelationId` (із заголовка `X-Correlation-Id` або згенерований, повертається у відповіді), `RequestPath`, `UserId`, `SourceContext`, `ServiceName` (з Лаб. 05 замість `Application`) |
 | HTTP | `UseSerilogRequestLogging` — один підсумковий запис на запит |
 
 ### Що видно в лозі SQL
@@ -525,7 +529,7 @@ flowchart LR
 | `Reviews.Domain` | `Common/` (`BaseEntity`, `ValueObject`), `Entities/` (`Review`, `Comment`, `Discussion`), `ValueObjects/` (`Author`, `Participant`, `Rating`, `MessagePreview`), `Enums/`, `Exceptions/`, `Interfaces/` (`IReviewRepository`, `IDiscussionRepository`) | лише пакет `MongoDB.Bson` (тип `ObjectId`), без драйвера |
 | `Reviews.Application` | `Common/Behaviors/`, `Common/Interfaces/` (`ICommand`, `IQuery`, `IReviewQueries`), `Common/Models/PagedResult`, `Reviews/Commands/*`, `Reviews/Queries/*`, `Discussions/...`, профілі AutoMapper, `DependencyInjection.cs` | Domain |
 | `Reviews.Infrastructure` | `Persistence/` (`MongoDbContext`, `MongoMappings`, серіалізатори, репозиторії, `ReviewQueries`), `Seeding/` (`IDataSeeder`, сідери, `IndexCreationService`, JSON із даними), `DependencyInjection.cs` | Application, Domain |
-| `Reviews.WebApi` | `Controllers/`, `Contracts/` (тіла HTTP-запитів), `Mapping/`, `ErrorHandling/GlobalExceptionHandler`, `Middleware/`, `Program.cs`, `appsettings.{Environment}.json` | Application, Infrastructure (лише для DI) |
+| `Reviews.WebApi` | `Controllers/`, `Contracts/` (тіла HTTP-запитів), `Mapping/`, `ErrorHandling/GlobalExceptionHandler`, `Program.cs` (CorrelationId з Лаб. 05 — у `Platform.ServiceDefaults`), `appsettings.{Environment}.json` | Application, Infrastructure (лише для DI) |
 | `Reviews.Tests` | тести домену, валідаторів, behaviors, обробників, BSON-мапінгу, запитів, архітектури та API | WebApi |
 
 Кожен шар реєструє себе сам — `Program.cs` лише викликає три методи:
@@ -654,7 +658,7 @@ builder.Services
 | `appsettings.Staging.json` | `mongo-staging`, база `feedback_db_staging` | так |
 | `appsettings.Production.json` | replica set із трьох вузлів, `w=majority`, `retryWrites=true` | ні |
 
-Під Aspire рядок підключення приходить змінною оточення `MongoDb__ConnectionString`. Стан бази показує `GET /health` — health check `AspNetCore.HealthChecks.MongoDb`.
+Під Aspire рядок підключення приходить змінною оточення `ConnectionStrings__FeedbackDb`; `Program.cs` переносить його в `MongoDb:ConnectionString`, тож Infrastructure не змінювалася. Стан бази показує `GET /health` — health check `AspNetCore.HealthChecks.MongoDb`.
 
 ### Помилки
 
@@ -744,6 +748,248 @@ dotnet run --project Services/Reviews/Reviews.WebApi
 ```
 
 Рядок підключення з `appsettings.Development.json` (`mongodb://localhost:27017`) підійде без змін. Індекси й дані сервіс створить сам. Можна також спершу виконати `db/p3/collections.js` і `seed.js` з Лаб. 01 — сервіс і скрипти не конфліктують.
+
+## Платформа: ServiceDefaults, API Gateway, Aggregator (Лаб. 05)
+
+Три сервіси Лаб. 02–04 об'єднано в одну платформу на .NET Aspire. Клієнт звертається лише до **Gateway** (`http://localhost:5000`); сервіси знаходять один одного за логічними іменами ресурсів AppHost; **Aggregator** збирає дані з кількох сервісів в одну відповідь; логи й трасування всіх компонентів видно в Aspire Dashboard.
+
+```mermaid
+flowchart LR
+    client(["Клієнт<br/>curl, Swagger"]) -->|"http://localhost:5000"| gw
+
+    subgraph platform ["Platform.AppHost (одна команда запуску)"]
+        gw["Platform.ApiGateway<br/>YARP, CorrelationId, логування маршрутизації"]
+        agg["Platform.Aggregator<br/>typed HttpClients, Task.WhenAll, часткові відмови"]
+        enr["enrollments-api<br/>Лаб. 02 · Dapper"]
+        crs["courses-api<br/>Лаб. 03 · EF Core"]
+        rev["reviews-api<br/>Лаб. 04 · MongoDB"]
+        sql[("sql<br/>EnrollmentsDb, CoursesDb")]
+        mongo[("mongo<br/>feedback_db")]
+    end
+
+    gw -->|"/api/aggregator/**"| agg
+    gw -->|"/api/orders, /api/students"| enr
+    gw -->|"/api/courses, /api/categories, /api/instructors"| crs
+    gw -->|"/api/reviews, /api/discussions, /api/courses/{id}/rating"| rev
+    agg -. "паралельно" .-> enr & crs & rev
+    enr --> sql
+    crs --> sql
+    rev --> mongo
+
+    sd[["Platform.ServiceDefaults<br/>Serilog · OpenTelemetry · health · service discovery · resilience"]]
+    sd -. "AddServiceDefaults()" .- gw & agg & enr & crs & rev
+    dash["Aspire Dashboard<br/>Structured logs · Traces · Metrics"]
+    sd -. "OTLP" .-> dash
+```
+
+| Компонент | Проєкт | Що робить |
+|---|---|---|
+| AppHost | `Platform.AppHost` | запускає контейнери SQL Server і MongoDB, три сервіси, Aggregator і Gateway; передає рядки підключення й адреси; задає порядок старту. Бізнес-логіки немає |
+| ServiceDefaults | `Platform.ServiceDefaults` | `Extensions.cs` — Serilog, OpenTelemetry, health checks, service discovery, resilience; `CorrelationIdMiddleware` і `CorrelationIdHandler` |
+| API Gateway | `Platform.ApiGateway` | єдина точка входу на YARP: маршрути й кластери з логічними іменами, CorrelationId, лог рішень маршрутизації, метрики |
+| Aggregator | `Platform.Aggregator` | картка замовлення й огляд курсу з даних трьох сервісів; паралельні виклики, часткові відповіді |
+| Мікросервіси | `Services/*` | Enrollments, Courses, Reviews — без змін бізнес-логіки, кожен зі своєю базою; один про одного не знають |
+
+Залежності односпрямовані: `Platform.AppHost` посилається на три API, Gateway і Aggregator; кожен із них — лише на `Platform.ServiceDefaults`; на AppHost не посилається ніхто.
+
+### Запуск платформи
+
+```powershell
+dotnet run --project Platform.AppHost
+```
+
+Docker Desktop має бути запущений. У консолі з'явиться посилання на Dashboard з токеном входу (`http://localhost:15266/login?t=...`). Порядок старту задають ланцюжки `WaitFor`, а «готовність» сервісу — `WithHttpHealthCheck("/health")`, тож Gateway не стартує, доки не відповідають усі сервіси:
+
+```text
+sql, mongo  ->  EnrollmentsDb, CoursesDb, FeedbackDb  ->  enrollments-api, courses-api, reviews-api  ->  aggregator  ->  gateway (:5000)
+```
+
+| Що | Адреса |
+|---|---|
+| Gateway — єдина точка входу | `http://localhost:5000` |
+| Health check Gateway | `http://localhost:5000/health` |
+| Aspire Dashboard | `http://localhost:15266` |
+| Swagger сервісів і Aggregator | посилання на ресурс у Dashboard + `/swagger` (порти з `launchSettings.json`: Enrollments `5209`, Courses `5141`, Reviews `5310`, Aggregator `5055`) |
+
+Що описано в `Platform.AppHost/AppHost.cs`:
+
+| Ресурс | Як | Навіщо |
+|---|---|---|
+| `sql-password` | `AddParameter("sql-password", secret: true)` | пароль `sa` не в коді: значення в user-secrets AppHost (`Parameters:sql-password`) або вводиться в Dashboard під час першого запуску |
+| `sql` | `AddSqlServer("sql", sqlPassword).WithDataVolume()` | дані зберігаються між перезапусками |
+| `EnrollmentsDb`, `CoursesDb` | `sql.AddDatabase(...)` | імена = імена рядків підключення в `appsettings.json` сервісів; `EnrollmentsDb` створюють скрипти `db/p1` |
+| `mongo` | `AddMongoDB("mongo", port: 27017).WithDataVolume()` | окремий том; сталий порт для MongoDB Compass |
+| `FeedbackDb` | `mongo.AddDatabase("FeedbackDb", databaseName: "feedback_db")` | сервіс отримує `ConnectionStrings__FeedbackDb` |
+| сервіси | `AddProject<...>("enrollments-api").WithReference(db).WaitFor(db).WithHttpHealthCheck("/health")` | ім'я ресурсу — логічне ім'я для service discovery |
+| `aggregator` | `WithReference` і `WaitFor` трьох сервісів | адреси `services__enrollments-api__http__0` тощо |
+| `gateway` | `WithHttpEndpoint(port: 5000, name: "public")`, `WithReference` усіх сервісів і Aggregator, `WaitFor(aggregator)` | фіксований порт для клієнтів |
+
+### Інтеграція сервісів Лаб. 02–04
+
+| Що змінено | Enrollments | Courses | Reviews |
+|---|---|---|---|
+| `*.csproj` API | посилання на `Platform.ServiceDefaults` | те саме | те саме |
+| `Program.cs` | `AddServiceDefaults()`, `UseCorrelationId()`, `MapDefaultEndpoints()`; прибрано власний `UseSerilog` | те саме; власний `CorrelationIdMiddleware` замінено спільним | те саме; `ConnectionStrings:FeedbackDb` від Aspire -> `MongoDb:ConnectionString`; `MapHealthChecks` -> `MapDefaultEndpoints` |
+| `appsettings*.json` | без змін (резервні рядки підключення лишилися для запуску без Aspire) | прибрано лише консольний sink — його тепер дає ServiceDefaults; файл `logs/*.json` і рівні лишилися | те саме |
+| власні spans | `Enrollments.Bll/Diagnostics` + `CreateOrder`, `AddOrderItem`, `ChangeOrderStatus` в `OrderService` | `Courses.Bll/Diagnostics` + `CreateCourse`, `ChangeCoursePrice`, `PublishCourse` | `TracingBehavior` — span на кожну команду й запит MediatR; атрибути `review.id`, `course.id` у `CreateReviewCommandHandler` |
+| трасування бази | SqlClient (Dapper) — автоматично | SqlClient (EF Core) — автоматично | `DiagnosticsActivityEventSubscriber` у `MongoDbContext` |
+
+Бізнес-правила, контролери, DAL і репозиторії не змінювалися: усі 195 тестів Лаб. 02–04 проходять (в архітектурний тест Reviews додано дозволене посилання на `Platform.ServiceDefaults`, у тест порядку behaviors — `TracingBehavior`).
+
+Бізнес-події логуються структуровано, без платіжних реквізитів і e-mail:
+
+```csharp
+logger.LogInformation("Order {OrderId} created for student {StudentId} with {ItemsCount} course(s), amount {Amount}, status {Status}",
+    orderId, input.StudentId, input.Items.Count, total, OrderStatuses.Submitted);
+
+using var activity = EnrollmentsTelemetry.Source.StartActivity("CreateOrder");   // ActivitySource "Enrollments.Bll"
+activity?.SetTag("order.id", orderId);
+```
+
+### ServiceDefaults
+
+`builder.AddServiceDefaults()` у кожному проєкті підключає:
+
+| Частина | Що налаштовано |
+|---|---|
+| Serilog | основний провайдер логування; рівень `Debug` у Development і `Information` в інших середовищах; `Warning` для `Microsoft.AspNetCore`, `Microsoft.EntityFrameworkCore`, `System.Net.Http.HttpClient`, `Polly`, `MongoDB`, `Yarp`; збагачення `ServiceName` (ім'я ресурсу з AppHost), `EnvironmentName`, `MachineName`, `ThreadId`, `FromLogContext` (`CorrelationId`, `RequestPath`); консоль — `CompactJsonFormatter`; `writeToProviders: true` |
+| OpenTelemetry — трасування | ASP.NET Core (вхідні запити), HttpClient (вихідні), SqlClient (Dapper і EF Core), MongoDB (`MongoDB.Driver.Core.Extensions.DiagnosticSources`), власні `ActivitySource` `<Сервіс>.*`; `/health` і `/alive` відфільтровано; семплінг 100 % у Development, в інших — `OpenTelemetry:SamplingRatio` (за замовчуванням 0.25, `ParentBased`) |
+| OpenTelemetry — метрики | ASP.NET Core (запити/с, тривалість, помилки), HttpClient, runtime, власні `Meter` (Gateway) |
+| експорт | `UseOtlpExporter()` — логи, трасування й метрики батчами по OTLP в Dashboard; адресу задає Aspire (`OTEL_EXPORTER_OTLP_ENDPOINT`) |
+| health checks | `/health` — усі перевірки (у Reviews ще й MongoDB), `/alive` — лише liveness |
+| HttpClient | service discovery (`https+http://courses-api`), `AddStandardResilienceHandler()`, `CorrelationIdHandler` |
+
+Чому `writeToProviders: true`: вкладка **Structured logs** отримує логи по OTLP від провайдера OpenTelemetry, а не з консолі. Serilog передає кожен запис далі цьому провайдеру, тож у Dashboard можна фільтрувати за властивостями (`CorrelationId`, `OrderId`, `ServiceName`). Стандартні провайдери `Console`/`Debug` прибрано, щоб записи не дублювалися в консолі.
+
+**CorrelationId** — бізнес-ідентифікатор звернення, один на весь ланцюжок:
+
+1. `CorrelationIdMiddleware` бере `X-Correlation-Id` із запиту або генерує GUID (зазвичай у Gateway — це логується) і записує його назад у `Request.Headers`.
+2. Ідентифікатор кладеться в `LogContext` (усі логи запиту), в атрибут span `correlation.id` і в заголовок відповіді.
+3. YARP копіює заголовки вхідного запиту, тож ідентифікатор доходить до сервісу; `CorrelationIdHandler` додає його в кожен вихідний `HttpClient`-запит (Aggregator -> сервіси).
+4. Межі запиту логуються в кожному сервісі: `Request started ...` / `Request finished ... with 200 in 12.3 ms`.
+
+`TraceId` генерує OpenTelemetry для технічного трасування (spans), `CorrelationId` — сам застосунок; його клієнт бачить у відповіді й може назвати підтримці. В одному записі логу є обидва.
+
+### API Gateway (YARP)
+
+Маршрути й кластери — розділ `ReverseProxy` у `Platform.ApiGateway/appsettings.json`. Адреси кластерів — логічні імена (`http://enrollments-api`), реальний `host:port` підставляє `AddServiceDiscoveryDestinationResolver()`.
+
+| Маршрут | Шлях | Кластер -> ресурс | Order |
+|---|---|---|---|
+| `aggregator` | `/api/aggregator/{**catch-all}` | `aggregator` | 1 |
+| `course-rating` | `/api/courses/{courseId:long}/rating` | `reviews` -> `reviews-api` | 1 |
+| `enrollments-catalog` | `/api/enrollments/{**catch-all}` -> `/api/{**catch-all}` | `enrollments` -> `enrollments-api` | 1 |
+| `orders`, `students` | `/api/orders/{**catch-all}`, `/api/students/{**catch-all}` | `enrollments` | 100 |
+| `courses`, `categories`, `instructors` | `/api/courses/...`, `/api/categories/...`, `/api/instructors/...` | `catalog` -> `courses-api` (`RoundRobin`) | 100 |
+| `reviews`, `discussions` | `/api/reviews/...`, `/api/discussions/...` | `reviews` -> `reviews-api` | 100 |
+
+- **Order:** менше значення — вищий пріоритет. `/api/courses/1/rating` збігається і з `course-rating`, і з catch-all `courses`; завдяки `Order: 1` запит іде в reviews-api, а не в каталог.
+- **Transform `PathPattern`:** у Enrollments є власний довідник курсів (`/api/courses/{id}/sales`), шлях якого зайнятий каталогом. Ззовні він доступний як `/api/enrollments/courses/{id}/sales`, а YARP переписує шлях на `/api/courses/{id}/sales`.
+- **Transform `RequestHeaderOriginalHost`** на маршрутах із записом: сервіс бачить зовнішній `Host`, тож `Location` у відповіді `201` вказує на Gateway (`http://localhost:5000/api/orders/10002`), а не на внутрішню адресу сервісу.
+- **Політики:** `HttpRequest.ActivityTimeout` — 15 с для сервісів і 10 с для Aggregator (за замовчуванням 100 с); `MaxRequestBodySize` 1 МБ для маршрутів із записом; `Metadata` (`Team`, `Version`) потрапляє в лог маршрутизації.
+
+Конвеєр Gateway (`Program.cs`): `UseCorrelationId()` -> `GatewayLoggingMiddleware` -> `MapReverseProxy` з кроками `SessionAffinity`, `LoadBalancing`, `PassiveHealthChecks` і `RoutingDecisionLogger`. Що потрапляє в логи:
+
+```text
+Routing GET /api/orders/1 via route orders (team enrollments, version v1) to cluster enrollments, destination http://localhost:5209/
+GET /api/orders/1 -> route orders, cluster enrollments (http://localhost:5209/): 200 in 18.4 ms, 474 bytes, client ::1
+Proxy error RequestTimedOut for GET /api/reviews -> route reviews, cluster reviews, destination http://localhost:5310/: The I/O operation has been aborted ...
+```
+
+Метрики Gateway (`Meter "Platform.ApiGateway"`, вкладка **Metrics**): `gateway.requests` (за `route`, `cluster`, `status_class` — запити за секунду й частка помилок), `gateway.request.duration` (середній час відповіді), `gateway.proxy.errors`.
+
+### Aggregator
+
+| Ендпоінт | Що повертає | Сервіси |
+|---|---|---|
+| `GET /api/aggregator/orders/{orderId}/full` | повна картка замовлення: позиції з актуальними даними курсу, рейтингом і останніми відгуками | enrollments-api, потім паралельно courses-api і reviews-api |
+| `GET /api/aggregator/courses/{courseId}/overview` | огляд курсу: каталог, відгуки, продажі | усі три паралельно |
+
+- **Typed HttpClients** (`Clients/`): `EnrollmentsClient`, `CoursesClient`, `ReviewsClient` з `BaseAddress = "https+http://<ресурс>"`. Кожен виклик логується (`Calling courses-api GET /api/courses/2` -> `courses-api responded 200 to GET /api/courses/2 in 85 ms`), відповідь десеріалізується в DTO, 404 повертається як `null`.
+- **Паралельність:** `Task.WhenAll` на двох рівнях — між сервісами і між курсами одного замовлення. `CancellationToken` іде в усі виклики; `.Result` і `Task.WaitAll` не використовуються.
+- **Часткові відмови** (`Services/AggregationContext.cs`): `SafeAsync` перехоплює `HttpRequestException`, timeout і розімкнений circuit breaker стандартного resilience-обробника, некоректний JSON — і повертає `null` з попередженням `reviews-api is unavailable: timeout`. Без замовлення картка не має сенсу, тому недоступний enrollments-api дає `503` у форматі ProblemDetails, а не `500`.
+- **Узгодженість:** у позицію потрапляють лише дані того курсу, Id якого є в замовленні; якщо сервіс повернув інший `courseId`, дані відкидаються з попередженням. `priceChanged` показує, чи змінилася ціна в каталозі після оформлення.
+- **Resilience:** для Aggregator `AttemptTimeout` 1.5 с, один повтор, загалом 5 с. Зупинений в Aspire сервіс не відмовляє одразу (з'єднання приймає проксі Aspire), тож часткова відповідь приходить приблизно за 3 с, а не за 30 с.
+- **JSON:** camelCase, `null`-поля не серіалізуються — дані недоступного сервісу просто відсутні, а причина — у `warnings`.
+
+Картка замовлення, коли reviews-api зупинено (скорочено):
+
+```json
+{
+  "orderId": 1,
+  "studentId": 1,
+  "status": "AccessGranted",
+  "totalAmount": 2500.00,
+  "paymentMethod": "Card",
+  "items": [
+    {
+      "courseId": 1,
+      "title": "C# для початківців",
+      "unitPrice": 1000.00,
+      "lineTotal": 1000.00,
+      "priceChanged": true,
+      "course": { "slug": "csharp-for-beginners", "currentPrice": 1200.00, "instructorName": "Андрій Мельник", "lessonsCount": 3 }
+    }
+  ],
+  "sources": [
+    { "service": "courses-api", "status": "ok", "elapsedMs": 13 },
+    { "service": "enrollments-api", "status": "ok", "elapsedMs": 17.4 },
+    { "service": "reviews-api", "status": "unavailable", "elapsedMs": 3299.7 }
+  ],
+  "warnings": [ "reviews-api is unavailable: timeout" ]
+}
+```
+
+Коли всі сервіси працюють, у кожній позиції є ще `feedback` — `reviewsCount`, `averageRating`, `distribution`, `latestReviews`, а `warnings` порожній.
+
+### Приклади запитів через Gateway
+
+```bash
+# кожен сервіс через одну точку входу; у відповіді — заголовок X-Correlation-Id
+curl -i http://localhost:5000/api/orders/1
+curl -i "http://localhost:5000/api/courses?page=1&pageSize=5"
+curl -i "http://localhost:5000/api/reviews?courseId=1"
+curl -i http://localhost:5000/api/courses/1/rating             # маршрут course-rating -> reviews-api
+curl -i http://localhost:5000/api/enrollments/courses/1/sales  # transform -> enrollments-api /api/courses/1/sales
+
+# агрегація; власний CorrelationId, щоб потім знайти всі логи запиту в Dashboard
+curl -i -H "X-Correlation-Id: demo-full-1" http://localhost:5000/api/aggregator/orders/1/full
+curl -i http://localhost:5000/api/aggregator/courses/2/overview
+curl -i http://localhost:5000/api/aggregator/orders/99999/full   # 404 ProblemDetails
+
+# запис через Gateway: нове замовлення -> 201, потім видалення чернетки
+curl -i -X POST http://localhost:5000/api/orders -H "Content-Type: application/json" \
+  -d '{"studentId":2,"billingName":"Test User","billingEmail":"test@example.com","paymentMethod":"Card","items":[{"courseId":3,"discount":0}]}'
+curl -i -X POST http://localhost:5000/api/orders/<id>/cancel
+curl -i -X DELETE http://localhost:5000/api/orders/<id>
+```
+
+Той самий запит в обхід Gateway (`http://localhost:5209/api/orders/1`) теж отримає `X-Correlation-Id` — його згенерує сам сервіс, — але в логах Gateway запису про нього не буде, і в trace не буде span Gateway.
+
+### Перевірка в Aspire Dashboard
+
+1. **Resources** — `sql`, `mongo`, три бази, `enrollments-api`, `courses-api`, `reviews-api`, `aggregator`, `gateway` у стані `Running`, health — `Healthy`.
+2. **Traces** — trace запиту `GET /api/aggregator/{**catch-all}`: `gateway` -> `aggregator` (`BuildOrderCard`) -> `enrollments-api` (SQL `SELECT dbo.Orders ...`) -> одночасно `courses-api` (SQL від EF Core) і `reviews-api` (`Reviews GetCourseRatingQuery` -> `aggregate reviews` у MongoDB). Spans викликів catalog і reviews перекриваються в часі — виклики паралельні.
+3. **Structured logs** — фільтр `CorrelationId = demo-full-1` показує записи всіх п'яти сервісів ланцюжка; у кожному є `ServiceName`, `EnvironmentName`, `MachineName`, `ThreadId`, а також TraceId і SpanId.
+4. **Відмова** — `reviews-api` -> **Stop**, повторити `curl http://localhost:5000/api/aggregator/orders/1/full`: `200`, замовлення й курси на місці, у `warnings` — `reviews-api is unavailable`; у логах Aggregator — `Warning` з причиною і тривалістю. **Start** — відповідь знову повна.
+
+### Знімки екрана
+
+Ресурси платформи в стані Running:
+
+![Aspire Dashboard: усі ресурси платформи в стані Running](docs/screenshots/lab05-resources.png)
+
+Trace агрегувального запиту — Gateway -> Aggregator -> сервіси -> SQL Server і MongoDB, паралельні виклики:
+
+![Trace агрегувального запиту з паралельними викликами courses-api і reviews-api](docs/screenshots/lab05-trace.png)
+
+Логи всіх сервісів, відфільтровані за одним CorrelationId:
+
+![Structured logs, відфільтровані за CorrelationId](docs/screenshots/lab05-logs-correlation.png)
+
+Часткова відповідь Aggregator при зупиненому reviews-api:
+
+![Часткова відповідь із попередженням у warnings](docs/screenshots/lab05-partial.png)
 
 ## Контексти та бази даних
 
@@ -925,7 +1171,10 @@ erDiagram
 ```
 README.md                  опис домену, запуск, розгортання БД, таблиця дублювання, ERD
 Platform.slnx              одне рішення на всю платформу
-Platform.AppHost/          оркестрація .NET Aspire (AppHost.cs)
+Platform.AppHost/          оркестрація .NET Aspire (AppHost.cs): бази, сервіси, Aggregator, Gateway
+Platform.ServiceDefaults/  Extensions.cs (Serilog, OpenTelemetry, resilience, health), CorrelationIdMiddleware, CorrelationIdHandler
+Platform.ApiGateway/       YARP: маршрути й кластери в appsettings.json, Logging/ (лог маршрутизації, метрики)
+Platform.Aggregator/       Clients/ (typed HttpClients), Services/ (агрегація, часткові відмови), Models/ (композитні DTO)
 Services/
   Enrollments/             Проєкт №1 — ADO.NET + Dapper
     Enrollments.Api/       контролери, Program.cs, appsettings.json, обробник помилок
@@ -1093,4 +1342,4 @@ EXEC dbo.usp_ChangeOrderStatus @OrderId = 3, @NewStatus = N'AccessGranted';
 
 ## Що далі
 
-Усі три бази тепер мають власні сервіси. Наступна робота — Лаб. 05.
+Сервіси об'єднано в платформу з єдиною точкою входу, наскрізним трасуванням і агрегацією. Наступна робота — Лаб. 06.

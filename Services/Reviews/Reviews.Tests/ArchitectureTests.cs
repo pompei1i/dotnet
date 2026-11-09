@@ -23,7 +23,7 @@ public class ArchitectureTests
         { "Reviews.Domain", [] },
         { "Reviews.Application", ["Reviews.Domain"] },
         { "Reviews.Infrastructure", ["Reviews.Application", "Reviews.Domain"] },
-        { "Reviews.WebApi", ["Reviews.Application", "Reviews.Infrastructure"] }
+        { "Reviews.WebApi", ["Platform.ServiceDefaults", "Reviews.Application", "Reviews.Infrastructure"] }   // + спільні налаштування платформи (Лаб. 05)
     };
 
     [Theory]

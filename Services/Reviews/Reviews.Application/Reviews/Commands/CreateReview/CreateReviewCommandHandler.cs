@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using AutoMapper;
 using MediatR;
 using Microsoft.Extensions.Logging;
@@ -27,8 +28,13 @@ public sealed class CreateReviewCommandHandler(
         // Одночасний другий відгук того самого студента відсіче унікальний індекс -> 409
         await reviews.AddAsync(review, ct);
 
-        logger.LogInformation("Review {ReviewId} created for course {CourseId} by student {StudentId}",
-            review.Id, review.CourseId, review.Author.StudentId);
+        // Бізнес-контекст у span TracingBehavior: за цими атрибутами trace шукається в Dashboard
+        Activity.Current?.SetTag("review.id", review.Id.ToString());
+        Activity.Current?.SetTag("course.id", review.CourseId);
+        Activity.Current?.SetTag("review.rating", command.Rating);
+
+        logger.LogInformation("Review {ReviewId} created for course {CourseId} by student {StudentId} with rating {Rating}",
+            review.Id, review.CourseId, review.Author.StudentId, command.Rating);
         return mapper.Map<ReviewDto>(review);
     }
 }

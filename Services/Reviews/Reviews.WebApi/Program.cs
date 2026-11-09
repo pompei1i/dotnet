@@ -1,17 +1,17 @@
 using Reviews.Application;
 using Reviews.Infrastructure;
 using Reviews.WebApi;
-using Reviews.WebApi.Middleware;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Логування: рівні, sinks (консоль і файл) та збагачення — в appsettings.json, розділ "Serilog"
-builder.Host.UseSerilog((context, services, configuration) => configuration
-    .ReadFrom.Configuration(context.Configuration)
-    .ReadFrom.Services(services)
-    .Enrich.FromLogContext()
-    .Enrich.WithProperty("Application", "Reviews.WebApi"));
+// Спільні налаштування платформи (Лаб. 05): Serilog, OpenTelemetry, health checks, service discovery
+builder.AddServiceDefaults();
+
+// Aspire передає рядок підключення до бази як ConnectionStrings:FeedbackDb, а Infrastructure
+// читає розділ MongoDb. Без Aspire лишається резервний MongoDb:ConnectionString з appsettings.json.
+if (builder.Configuration.GetConnectionString("FeedbackDb") is { Length: > 0 } feedbackDb)
+    builder.Configuration["MongoDb:ConnectionString"] = feedbackDb;
 
 // Кожен шар реєструє себе сам; WebApi знає про Infrastructure лише тут, під час старту
 builder.Services
@@ -21,14 +21,14 @@ builder.Services
 
 var app = builder.Build();
 
-// CorrelationId стоїть першим, щоб його бачили всі логи запиту, зокрема логи behaviors
-app.UseMiddleware<CorrelationIdMiddleware>();
+// CorrelationId з ServiceDefaults стоїть першим, щоб його бачили всі логи запиту, зокрема логи behaviors
+app.UseCorrelationId();
 
 // Підсумковий запис про запит — зовні обробника винятків: він бачить уже остаточний статус
 // (400, 404, 409...) і пише його на рівні Information, а не як необроблену помилку
 app.UseSerilogRequestLogging(options => options.EnrichDiagnosticContext = (diagnostic, http) =>
 {
-    diagnostic.Set("CorrelationId", http.Items[CorrelationIdMiddleware.HeaderName]);
+    diagnostic.Set("CorrelationId", http.Items[Platform.ServiceDefaults.CorrelationIdMiddleware.HeaderName]);
     diagnostic.Set("UserId", http.User.Identity?.Name ?? "anonymous");
 });
 
@@ -41,7 +41,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapControllers();
-app.MapHealthChecks("/health");
+app.MapDefaultEndpoints();   // /health (зокрема перевірка MongoDB) і /alive
 
 app.Run();
 

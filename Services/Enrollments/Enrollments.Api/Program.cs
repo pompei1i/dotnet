@@ -6,16 +6,13 @@ using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Спільні налаштування платформи (Лаб. 05): Serilog, OpenTelemetry, health checks, service discovery
+builder.AddServiceDefaults();
+
 // Рядок підключення лежить в appsettings.json і перевизначається змінною оточення
 // ConnectionStrings__EnrollmentsDb — саме так його передає .NET Aspire (Platform.AppHost).
 var connectionString = builder.Configuration.GetConnectionString("EnrollmentsDb")
     ?? throw new InvalidOperationException("Connection string 'EnrollmentsDb' is missing");
-
-// Логування: Serilog читає рівні з конфігурації та пише в консоль
-builder.Host.UseSerilog((context, configuration) => configuration
-    .ReadFrom.Configuration(context.Configuration)
-    .Enrich.FromLogContext()
-    .WriteTo.Console());
 
 // DAL: Unit of Work — Scoped, тобто один екземпляр і одне з'єднання на HTTP-запит
 builder.Services.AddScoped<IUnitOfWork>(_ => new UnitOfWork(connectionString));
@@ -49,6 +46,9 @@ builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
+// CorrelationId з ServiceDefaults — першим, щоб його бачили всі логи запиту
+app.UseCorrelationId();
+
 app.UseExceptionHandler();
 app.UseSerilogRequestLogging();
 
@@ -59,6 +59,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapControllers();
+app.MapDefaultEndpoints();   // /health і /alive
 
 app.Run();
 

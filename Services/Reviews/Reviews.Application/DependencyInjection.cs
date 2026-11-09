@@ -22,7 +22,9 @@ public static class DependencyInjection
             cfg.LicenseKey = configuration["LuckyPenny:LicenseKey"];
             cfg.RegisterServicesFromAssembly(assembly);
 
-            // Порядок реєстрації = порядок виконання: Logging -> Validation -> Performance -> обробник
+            // Порядок реєстрації = порядок виконання: Tracing -> Logging -> Validation -> Performance -> обробник.
+            // Tracing — найзовнішній, щоб логи всіх інших behaviors мали SpanId бізнес-операції
+            cfg.AddOpenBehavior(typeof(TracingBehavior<,>));
             cfg.AddOpenBehavior(typeof(LoggingBehavior<,>));
             cfg.AddOpenBehavior(typeof(ValidationBehavior<,>));
             cfg.AddOpenBehavior(typeof(PerformanceBehavior<,>));

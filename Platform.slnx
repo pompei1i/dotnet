@@ -21,5 +21,8 @@
     <Project Path="Services/Reviews/Reviews.Tests/Reviews.Tests.csproj" />
     <Project Path="Services/Reviews/Reviews.WebApi/Reviews.WebApi.csproj" />
   </Folder>
+  <Project Path="Platform.Aggregator/Platform.Aggregator.csproj" />
+  <Project Path="Platform.ApiGateway/Platform.ApiGateway.csproj" />
   <Project Path="Platform.AppHost/Platform.AppHost.csproj" />
+  <Project Path="Platform.ServiceDefaults/Platform.ServiceDefaults.csproj" />
 </Solution>

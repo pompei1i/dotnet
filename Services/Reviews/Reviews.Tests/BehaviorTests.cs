@@ -38,7 +38,7 @@ public class BehaviorTests
             .Select(b => b.GetType().GetGenericTypeDefinition())
             .ToList();
 
-        Assert.Equal([typeof(LoggingBehavior<,>), typeof(ValidationBehavior<,>), typeof(PerformanceBehavior<,>)], behaviors);
+        Assert.Equal([typeof(TracingBehavior<,>), typeof(LoggingBehavior<,>), typeof(ValidationBehavior<,>), typeof(PerformanceBehavior<,>)], behaviors);
     }
 
     [Fact]

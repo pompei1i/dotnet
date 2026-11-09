@@ -1,5 +1,6 @@
 using System.Data;
 using AutoMapper;
+using Enrollments.Bll.Diagnostics;
 using Enrollments.Bll.Dtos;
 using Enrollments.Bll.Validation;
 using Enrollments.Dal;
@@ -55,9 +56,15 @@ public class OrderService(IUnitOfWork uow, IMapper mapper, ILogger<OrderService>
     /// </summary>
     public async Task<OrderDto> CreateAsync(CreateOrderDto input, CancellationToken ct = default)
     {
+        // Власний span бізнес-операції: усередині нього — SQL-spans усіх чотирьох таблиць
+        using var activity = EnrollmentsTelemetry.Source.StartActivity("CreateOrder");
+        activity?.SetTag("student.id", input.StudentId);
+        activity?.SetTag("order.items_count", input.Items.Count);
+
         OrderRules.EnsureNoDuplicateCourses(input.Items);
 
         long orderId;
+        var total = 0m;
 
         // ReadCommitted достатньо: операція лише додає нові рядки і не змінює прочитані
         await uow.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct);
@@ -84,7 +91,6 @@ public class OrderService(IUnitOfWork uow, IMapper mapper, ILogger<OrderService>
                 CreatedBy = Actor
             }, ct);
 
-            var total = 0m;
             foreach (var line in input.Items)
                 total += await AddItemSnapshotAsync(orderId, line, ct);           // dbo.OrderItems
 
@@ -108,8 +114,12 @@ public class OrderService(IUnitOfWork uow, IMapper mapper, ILogger<OrderService>
             throw;
         }
 
-        logger.LogInformation("Order {OrderId} created for student {StudentId} with {ItemsCount} course(s)",
-            orderId, input.StudentId, input.Items.Count);
+        activity?.SetTag("order.id", orderId);
+        activity?.SetTag("order.amount", total);
+
+        // Платіжні реквізити (BillingEmail тощо) в лог не пишуться — лише ідентифікатори й суми
+        logger.LogInformation("Order {OrderId} created for student {StudentId} with {ItemsCount} course(s), amount {Amount}, status {Status}",
+            orderId, input.StudentId, input.Items.Count, total, OrderStatuses.Submitted);
 
         return await GetByIdAsync(orderId, ct);
     }
@@ -120,6 +130,10 @@ public class OrderService(IUnitOfWork uow, IMapper mapper, ILogger<OrderService>
     /// </summary>
     public async Task<OrderDto> AddItemAsync(long orderId, CreateOrderItemDto input, CancellationToken ct = default)
     {
+        using var activity = EnrollmentsTelemetry.Source.StartActivity("AddOrderItem");
+        activity?.SetTag("order.id", orderId);
+        activity?.SetTag("course.id", input.CourseId);
+
         await uow.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct);
         try
         {
@@ -156,6 +170,10 @@ public class OrderService(IUnitOfWork uow, IMapper mapper, ILogger<OrderService>
 
     public async Task ChangeStatusAsync(long orderId, string newStatus, CancellationToken ct = default)
     {
+        using var activity = EnrollmentsTelemetry.Source.StartActivity("ChangeOrderStatus");
+        activity?.SetTag("order.id", orderId);
+        activity?.SetTag("order.status", newStatus);
+
         OrderRules.EnsureKnownStatus(newStatus);
 
         // Допустимість переходу перевіряє процедура usp_ChangeOrderStatus з Лаб. 01; вона сама

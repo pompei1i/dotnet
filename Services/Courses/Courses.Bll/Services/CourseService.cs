@@ -1,4 +1,5 @@
 using AutoMapper;
+using Courses.Bll.Diagnostics;
 using Courses.Bll.Dtos;
 using Courses.Bll.Specifications;
 using Courses.Dal;
@@ -39,6 +40,11 @@ public class CourseService(IUnitOfWork uow, IMapper mapper, ILogger<CourseServic
 
     public async Task<CourseDetailsDto> CreateAsync(CreateCourseDto input, CancellationToken ct = default)
     {
+        // Власний span бізнес-операції: усередині нього — SQL-spans перевірок і INSERT від EF Core
+        using var activity = CoursesTelemetry.Source.StartActivity("CreateCourse");
+        activity?.SetTag("instructor.id", input.InstructorId);
+        activity?.SetTag("course.slug", input.Slug);
+
         var instructor = await uow.Instructors.GetByIdAsync(input.InstructorId, ct)
                          ?? throw new EntityNotFoundException(nameof(Instructor), input.InstructorId);
 
@@ -65,14 +71,20 @@ public class CourseService(IUnitOfWork uow, IMapper mapper, ILogger<CourseServic
         await uow.Courses.AddAsync(course, ct);
         await uow.SaveChangesAsync(ct);   // Courses, CourseDetails і CourseCategories — однією транзакцією
 
-        logger.LogInformation("Course {CourseId} '{CourseSlug}' created for instructor {InstructorId}",
-            course.Id, course.Slug, instructor.Id);
+        activity?.SetTag("course.id", course.Id);
+
+        logger.LogInformation("Course {CourseId} '{CourseSlug}' created for instructor {InstructorId} with price {Price}",
+            course.Id, course.Slug, instructor.Id, course.Price);
 
         return mapper.Map<CourseDetailsDto>(course);
     }
 
     public async Task ChangePriceAsync(long id, ChangePriceDto input, CancellationToken ct = default)
     {
+        using var activity = CoursesTelemetry.Source.StartActivity("ChangeCoursePrice");
+        activity?.SetTag("course.id", id);
+        activity?.SetTag("course.new_price", input.Price);
+
         var course = await uow.Courses.GetByIdAsync(id, ct)
                      ?? throw new EntityNotFoundException(nameof(Course), id);
 
@@ -85,6 +97,9 @@ public class CourseService(IUnitOfWork uow, IMapper mapper, ILogger<CourseServic
 
     public async Task PublishAsync(long id, CancellationToken ct = default)
     {
+        using var activity = CoursesTelemetry.Source.StartActivity("PublishCourse");
+        activity?.SetTag("course.id", id);
+
         // Публікація перевіряє опис і уроки, тому курс читається разом з ними
         var course = await uow.Courses.GetWithDetailsAsync(id, ct)
                      ?? throw new EntityNotFoundException(nameof(Course), id);
@@ -92,7 +107,7 @@ public class CourseService(IUnitOfWork uow, IMapper mapper, ILogger<CourseServic
         course.Publish(DateTime.UtcNow);
         await uow.SaveChangesAsync(ct);
 
-        logger.LogInformation("Course {CourseId} published", id);
+        logger.LogInformation("Course {CourseId} published, status {Status}", id, "Published");
     }
 
     public async Task UnpublishAsync(long id, CancellationToken ct = default)
