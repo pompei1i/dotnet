@@ -1,3 +1,4 @@
+using Platform.Aggregator.Caching;
 using Platform.Aggregator.Clients;
 using Platform.Aggregator.Models;
 
@@ -11,10 +12,18 @@ public sealed class CourseOverviewService(
     EnrollmentsClient enrollments,
     CoursesClient courses,
     ReviewsClient reviews,
+    AggregateCache cache,
     ILogger<CourseOverviewService> logger)
 {
-    /// <summary>null — курсу немає в каталозі (каталог доступний і відповів 404).</summary>
-    public async Task<CourseOverviewDto?> GetOverviewAsync(long courseId, CancellationToken ct)
+    /// <summary>
+    /// null — курсу немає в каталозі (каталог доступний і відповів NOT_FOUND). Повний огляд кешується
+    /// в Redis на 30 с; частковий — ні.
+    /// </summary>
+    public Task<CourseOverviewDto?> GetOverviewAsync(long courseId, CancellationToken ct)
+        => cache.GetOrBuildAsync(AggregateCache.CourseOverviewKey(courseId), () => BuildOverviewAsync(courseId, ct),
+            overview => overview.Warnings.Count == 0, ct);
+
+    private async Task<CourseOverviewDto?> BuildOverviewAsync(long courseId, CancellationToken ct)
     {
         using var activity = AggregatorTelemetry.Source.StartActivity("BuildCourseOverview");
         activity?.SetTag("course.id", courseId);

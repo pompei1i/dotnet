@@ -6,13 +6,21 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <!-- gRPC-контракт каталогу (Лаб. 06): тут генерується серверна частина (CoursesService.CoursesServiceBase),
+       Platform.Aggregator підключає цей самий файл з GrpcServices="Client" -->
+  <ItemGroup>
+    <Protobuf Include="Protos\courses.proto" GrpcServices="Server" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\Courses.Bll\Courses.Bll.csproj" />
     <ProjectReference Include="..\..\..\Platform.ServiceDefaults\Platform.ServiceDefaults.csproj" />
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Aspire.StackExchange.Redis.DistributedCaching" Version="13.6.1" />
     <PackageReference Include="FluentValidation.DependencyInjectionExtensions" Version="12.2.0" />
+    <PackageReference Include="Grpc.AspNetCore" Version="2.85.0" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.14">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>

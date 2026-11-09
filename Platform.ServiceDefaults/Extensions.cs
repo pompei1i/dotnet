@@ -29,6 +29,15 @@ public static class Extensions
     /// <summary>ActivitySource драйвера MongoDB (пакет MongoDB.Driver.Core.Extensions.DiagnosticSources).</summary>
     public const string MongoDbActivitySource = "MongoDB.Driver.Core.Extensions.DiagnosticSources";
 
+    /// <summary>Meter і ActivitySource кешу кожного сервісу мають ім'я "{Сервіс}.Cache".</summary>
+    public const string CacheMeterPattern = "*.Cache";
+
+    /// <summary>
+    /// Grpc.Net.Client створює власний span кожного виклику (grpc.method, grpc.status_code). Без підписки
+    /// на це джерело span не експортується, і HTTP-span виклику «повисає» без батька у trace.
+    /// </summary>
+    public const string GrpcClientActivitySource = "Grpc.Net.Client";
+
     public static TBuilder AddServiceDefaults<TBuilder>(this TBuilder builder) where TBuilder : IHostApplicationBuilder
     {
         builder.AddSerilogLogging();
@@ -86,6 +95,8 @@ public static class Extensions
             .MinimumLevel.Override("Polly", LogEventLevel.Warning)
             .MinimumLevel.Override("MongoDB", LogEventLevel.Warning)
             .MinimumLevel.Override("Yarp", LogEventLevel.Warning)
+            // Вбудовані логи gRPC дублюють GrpcLoggingInterceptor; лишаємо лише попередження й помилки
+            .MinimumLevel.Override("Grpc", LogEventLevel.Warning)
             // Сервіс може точково перевизначити рівні в розділі "Serilog" свого appsettings.json
             .ReadFrom.Configuration(builder.Configuration)
             .ReadFrom.Services(services)
@@ -125,13 +136,21 @@ public static class Extensions
                 metrics.AddAspNetCoreInstrumentation()     // http.server.request.duration: RPS, тривалість, помилки
                     .AddHttpClientInstrumentation()
                     .AddRuntimeInstrumentation()
-                    .AddMeter(applicationName, sourcePrefix);  // власні метрики (наприклад, Gateway)
+                    .AddMeter(applicationName, sourcePrefix)   // власні метрики (наприклад, Gateway)
+                    // Лаб. 06: метрики кешу кожного сервісу — Meter "Courses.Cache", "Reviews.Cache",
+                    // "Platform.Aggregator.Cache": cache.hits / cache.misses з тегом cache.level (L1 | L2)
+                    .AddMeter(CacheMeterPattern);
             })
             .WithTracing(tracing =>
             {
                 tracing.SetSampler(CreateSampler(builder));
 
+                // gRPC: клієнтський виклик — span Grpc.Net.Client, під ним HTTP-span (AddHttpClientInstrumentation);
+                // серверний — span ASP.NET Core (AddAspNetCoreInstrumentation), GrpcLoggingInterceptor дописує rpc.*.
+                // Заголовок traceparent у метаданих gRPC зв'язує spans клієнта й сервера в один trace.
                 tracing.AddSource(applicationName, sourcePrefix)  // власні spans бізнес-операцій
+                    .AddSource(CacheMeterPattern)                 // spans операцій кешу (Лаб. 06)
+                    .AddSource(GrpcClientActivitySource)          // клієнтський span gRPC-виклику (батько HTTP POST)
                     .AddSource(MongoDbActivitySource)             // команди MongoDB (сервіс відгуків)
                     .AddAspNetCoreInstrumentation(options =>
                     {

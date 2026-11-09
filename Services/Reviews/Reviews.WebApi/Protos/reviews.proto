@@ -1,0 +1,61 @@
+// gRPC-контракт сервісу відгуків (Лаб. 06) для внутрішніх сервісів — насамперед Aggregator.
+// Номери полів після публікації не змінюються: саме вони, а не імена, визначають бінарний формат.
+syntax = "proto3";
+
+option csharp_namespace = "Reviews.Grpc";
+
+package reviews;
+
+import "google/protobuf/timestamp.proto";
+
+// Читання відгуків. Методи надсилають ті самі запити MediatR, що й REST-контролери,
+// тож проходять увесь pipeline: валідацію, кеш (HybridCache L1 + Redis), трасування.
+service ReviewsService {
+  // Рейтинг одного курсу: середня оцінка й розподіл оцінок
+  rpc GetCourseRating (GetCourseRatingRequest) returns (CourseRatingReply);
+
+  // Рейтинг і останні відгуки кількох курсів одним викликом. У Лаб. 05 Aggregator робив
+  // по два HTTP-запити на кожен курс замовлення; тепер це один gRPC-виклик.
+  rpc GetCoursesFeedback (GetCoursesFeedbackRequest) returns (CoursesFeedbackReply);
+}
+
+message GetCourseRatingRequest {
+  int64 course_id = 1;
+}
+
+message GetCoursesFeedbackRequest {
+  // Від 1 до 50 додатних Id курсів
+  repeated int64 course_ids = 1;
+  // Скільки останніх відгуків повернути для кожного курсу: 1..20, 0 -> 3
+  int32 latest_count = 2;
+}
+
+message CoursesFeedbackReply {
+  repeated CourseFeedbackReply courses = 1;
+}
+
+message CourseFeedbackReply {
+  int64 course_id = 1;
+  CourseRatingReply rating = 2;
+  repeated ReviewItemReply latest_reviews = 3;
+}
+
+message CourseRatingReply {
+  int64 course_id = 1;
+  int32 reviews_count = 2;
+  // Відсутнє, якщо відгуків ще немає
+  optional double average_rating = 3;
+  // Оцінка ("1".."5") -> кількість відгуків
+  map<string, int32> distribution = 4;
+}
+
+message ReviewItemReply {
+  // ObjectId відгуку в MongoDB
+  string id = 1;
+  int64 course_id = 2;
+  string author_name = 3;
+  int32 rating = 4;
+  optional string text = 5;
+  bool is_verified_purchase = 6;
+  google.protobuf.Timestamp created_at = 7;
+}

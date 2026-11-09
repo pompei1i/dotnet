@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using Grpc.Core;
 using Platform.Aggregator.Models;
 using Polly.CircuitBreaker;
 using Polly.Timeout;
@@ -94,12 +95,17 @@ public sealed class AggregationContext(ILogger logger, CancellationToken ct)
     }
 
     /// <summary>
-    /// Відмови сервісу: мережа й статуси 5xx (HttpRequestException), timeout і розімкнений
-    /// circuit breaker стандартного resilience-обробника, некоректний JSON. Скасування запиту
-    /// клієнтом (ct) — не відмова сервісу, воно пробрасується далі й зупиняє решту викликів.
+    /// Відмови сервісу. gRPC (Лаб. 06): RpcException зі статусом UNAVAILABLE (сервіс не відповідає,
+    /// timeout чи circuit breaker resilience-обробника всередині HttpClient), DEADLINE_EXCEEDED,
+    /// INTERNAL / UNKNOWN (збій на боці сервісу), RESOURCE_EXHAUSTED. Помилки самого запиту
+    /// (INVALID_ARGUMENT, PERMISSION_DENIED) — баг агрегатора, а не недоступність, тож не ковтаються.
+    /// Скасування запиту клієнтом (ct) — не відмова сервісу, воно пробрасується далі.
     /// </summary>
     private bool IsUpstreamFailure(Exception exception) => exception switch
     {
+        RpcException { StatusCode: StatusCode.Cancelled } => !ct.IsCancellationRequested,
+        RpcException rpc => rpc.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded
+            or StatusCode.Internal or StatusCode.Unknown or StatusCode.ResourceExhausted,
         HttpRequestException or TimeoutRejectedException or BrokenCircuitException or JsonException => true,
         OperationCanceledException => !ct.IsCancellationRequested,
         _ => false
@@ -107,6 +113,12 @@ public sealed class AggregationContext(ILogger logger, CancellationToken ct)
 
     private static string Describe(Exception exception) => exception switch
     {
+        // Причина відмови HttpClient (timeout Polly, відмова з'єднання) лежить у DebugException
+        RpcException { Status.DebugException: TimeoutRejectedException or OperationCanceledException } => "timeout",
+        RpcException { Status.DebugException: BrokenCircuitException } => "circuit breaker is open",
+        RpcException { StatusCode: StatusCode.DeadlineExceeded } => "timeout",
+        RpcException { StatusCode: StatusCode.Unavailable } => "unavailable",
+        RpcException rpc => $"gRPC {rpc.StatusCode}",
         HttpRequestException { StatusCode: { } status } => $"HTTP {(int)status}",
         HttpRequestException http => http.HttpRequestError.ToString(),
         TimeoutRejectedException or OperationCanceledException => "timeout",

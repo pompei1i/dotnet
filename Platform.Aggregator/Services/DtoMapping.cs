@@ -16,7 +16,7 @@ internal static class DtoMapping
         course.Instructor.FullName,
         course.Detail?.DurationHours,
         course.Detail?.HasCertificate,
-        course.Lessons?.Count);
+        course.LessonsCount);
 
     public static CourseFeedbackDto ToCourseFeedback(this CourseFeedbackResponse feedback) => new(
         feedback.Rating?.ReviewsCount ?? 0,

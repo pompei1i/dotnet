@@ -1,18 +1,37 @@
+using Enrollments.Grpc;
+
 namespace Platform.Aggregator.Clients;
 
-/// <summary>Typed-клієнт сервісу Enrollments (Лаб. 02): замовлення й продажі курсів.</summary>
-public sealed class EnrollmentsClient(HttpClient http, ILogger<EnrollmentsClient> logger) : UpstreamClient(http, logger)
+/// <summary>Клієнт сервісу Enrollments (Лаб. 02) поверх згенерованого gRPC-клієнта: замовлення й продажі курсів.</summary>
+public sealed class EnrollmentsClient(OrdersService.OrdersServiceClient grpc, ILogger<EnrollmentsClient> logger) : GrpcUpstream(logger)
 {
     public override string ServiceName => "enrollments-api";
 
-    public Task<OrderResponse?> GetOrderAsync(long orderId, CancellationToken ct)
-        => GetAsync<OrderResponse>($"/api/orders/{orderId}", ct);
+    public async Task<OrderResponse?> GetOrderAsync(long orderId, CancellationToken ct)
+    {
+        var order = await CallAsync("GetOrder", () => grpc.GetOrderAsync(new GetOrderRequest { Id = orderId }, Options(ct)));
+        return order is null
+            ? null
+            : new OrderResponse(
+                order.Id,
+                order.StudentId,
+                order.Status,
+                order.OrderDate.ToDateTime(),
+                order.TotalAmount.ToDecimal(),
+                order.HasPaymentMethod ? new OrderDetailsResponse(order.PaymentMethod) : null,
+                [.. order.Items.Select(item => new OrderItemResponse(
+                    item.CourseId, item.CourseTitle, item.UnitPrice.ToDecimal(), item.Discount.ToDecimal(), item.LineTotal.ToDecimal()))]);
+    }
 
-    public Task<CourseSalesResponse?> GetCourseSalesAsync(long courseId, CancellationToken ct)
-        => GetAsync<CourseSalesResponse>($"/api/courses/{courseId}/sales", ct);
+    public async Task<CourseSalesResponse?> GetCourseSalesAsync(long courseId, CancellationToken ct)
+    {
+        var sales = await CallAsync("GetCourseSales",
+            () => grpc.GetCourseSalesAsync(new GetCourseSalesRequest { CourseId = courseId }, Options(ct)));
+        return sales is null ? null : new CourseSalesResponse(sales.CourseId, sales.OrdersCount, sales.Revenue.ToDecimal());
+    }
 }
 
-// Відповіді enrollments-api — лише поля, потрібні агрегатору
+// Дані замовлень, потрібні агрегатору (з protobuf-повідомлень)
 
 public sealed record OrderResponse(
     long Id,

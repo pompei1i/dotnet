@@ -1,4 +1,7 @@
+using StackExchange.Redis;
 using Courses.Api.Controllers;
+using Courses.Api.Grpc;
+using Courses.Bll.Caching;
 using Courses.Bll.Mapping;
 using Courses.Bll.Services;
 using Courses.Bll.Validation;
@@ -7,6 +10,7 @@ using Courses.Dal.Seeding;
 using FluentValidation;
 using Microsoft.EntityFrameworkCore;
 using Platform.ServiceDefaults;
+using Platform.ServiceDefaults.Grpc;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -22,6 +26,53 @@ var connectionString = builder.Configuration.GetConnectionString("CoursesDb")
 // DAL: DbContext і Unit of Work — Scoped, один контекст на HTTP-запит
 builder.Services.AddDbContext<CoursesDbContext>(options => options.UseSqlServer(connectionString));
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
+
+// ---------- Кешування (Лаб. 06) ----------
+
+// L1 — IMemoryCache у пам'яті процесу. SizeLimit обмежує його: кожен запис має Size у KiB свого JSON,
+// тож разом не більше ~10 МБ; при переповненні витісняється 20 % записів — спершу Low-пріоритет
+// (сторінки списку), потім Normal (картки), High (довідники) — в останню чергу. TrackStatistics —
+// для метрик cache.l1.* і health check.
+builder.Services.AddMemoryCache(options =>
+{
+    options.SizeLimit = 10_000;
+    options.CompactionPercentage = 0.2;
+    options.ExpirationScanFrequency = TimeSpan.FromMinutes(1);
+    options.TrackStatistics = true;
+});
+
+// L2 — IDistributedCache поверх Redis через Aspire-інтеграцію. Рядок підключення ConnectionStrings:redis
+// передає AppHost; інтеграція сама додає повторні з'єднання, health check і трасування команд Redis.
+// Без Aspire (dotnet run, тести) рядка немає — тоді L2 замінює MemoryDistributedCache і кеш фактично однорівневий
+if (!string.IsNullOrEmpty(builder.Configuration.GetConnectionString("redis")))
+    builder.AddRedisDistributedCache("redis", configureOptions: redis =>
+    {
+        // Redis — прискорювач: якщо він недоступний, команди мають падати одразу (FailFast), а не стояти
+        // в черзі до timeout (5 с за замовчуванням), інакше кожен запит чекав би секунди замість мілісекунд
+        redis.BacklogPolicy = BacklogPolicy.FailFast;
+        redis.ConnectTimeout = 2000;
+        redis.AsyncTimeout = 1000;
+        redis.SyncTimeout = 1000;
+        redis.AbortOnConnectFail = false;
+    });
+else
+    builder.Services.AddDistributedMemoryCache();
+
+builder.Services.Configure<CachingOptions>(builder.Configuration.GetSection(CachingOptions.SectionName));
+builder.Services.AddSingleton<CacheMetrics>();
+builder.Services.AddSingleton<ITwoLevelCache, TwoLevelCache>();
+builder.Services.AddHostedService<CacheWarmupService>();
+builder.Services.AddHealthChecks().AddCheck<CacheHealthCheck>("cache");
+
+// ---------- gRPC (Лаб. 06) ----------
+
+// Серверний interceptor з ServiceDefaults логує кожен виклик (метод, peer, статус, тривалість).
+// Endpoint "grpc" (HTTP/2) описано в Kestrel:Endpoints у appsettings.json
+builder.Services.AddGrpc(options =>
+{
+    options.Interceptors.Add<GrpcLoggingInterceptor>();
+    options.EnableDetailedErrors = builder.Environment.IsDevelopment();
+});
 
 // BLL: сервіси
 builder.Services.AddScoped<ICourseService, CourseService>();
@@ -95,6 +146,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapControllers();
+app.MapGrpcService<CoursesGrpcService>();   // gRPC-API каталогу для Aggregator
 app.MapDefaultEndpoints();   // /health і /alive
 
 app.Run();

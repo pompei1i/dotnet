@@ -7,6 +7,7 @@
 - **Лабораторна робота №3** — сервіс `Courses` на базі Проєкту №2: EF Core Code First, Fluent API, міграції й сідінг, Generic Repository і Unit of Work, специфікації, пагінація, FluentValidation, Serilog. Див. [Сервіс Courses](#сервіс-courses--ef-core-лаб-03).
 - **Лабораторна робота №4** — сервіс `Reviews` на базі Проєкту №3: Clean Architecture з чотирьох шарів, CQRS і MediatR із pipeline behaviors, Value Objects, MongoDB з BsonClassMap, оптимістичною конкурентністю, індексами й сідінгом. Див. [Сервіс Reviews](#сервіс-reviews--clean-architecture-cqrs-mongodb-лаб-04).
 - **Лабораторна робота №5** — мікросервісна платформа на .NET Aspire: спільні `ServiceDefaults` (Serilog, OpenTelemetry, CorrelationId), API Gateway на YARP, Aggregator із паралельними викликами й частковими відмовами, трасування й логи всіх сервісів в Aspire Dashboard. Див. [Платформа](#платформа-servicedefaults-api-gateway-aggregator-лаб-05).
+- **Лабораторна робота №6** — gRPC і кешування: Redis в AppHost, дворівневий кеш L1 (`IMemoryCache`) + L2 (Redis) у каталозі курсів і `HybridCache` у відгуках з інвалідацією після запису, gRPC-контракти й сервіси в усіх трьох мікросервісах, Aggregator на паралельних gRPC-викликах із кешем агрегованих відповідей, interceptor і метрики кешу в Dashboard. Див. [gRPC і кешування](#grpc-і-кешування-лаб-06).
 
 ## Предметна область
 
@@ -991,6 +992,279 @@ Trace агрегувального запиту — Gateway -> Aggregator -> с�
 
 ![Часткова відповідь із попередженням у warnings](docs/screenshots/lab05-partial.png)
 
+## gRPC і кешування (Лаб. 06)
+
+Платформа Лаб. 05 отримала дві оптимізації: **кешування** даних, які часто читають і рідко змінюють (каталог курсів, рейтинг і відгуки), і **gRPC** для внутрішніх викликів Aggregator замість HTTP REST. Зовнішній API не змінився: клієнти, як і раніше, ходять у Gateway по REST.
+
+```mermaid
+flowchart LR
+    client(["Клієнт"]) -->|"REST :5000"| gw["gateway<br/>YARP"]
+    gw -->|"REST"| agg["aggregator<br/>gRPC-клієнти · Task.WhenAll"]
+    gw -->|"REST"| crs & rev & enr
+    agg -->|"gRPC h2c :5210"| enr["enrollments-api<br/>OrdersService"]
+    agg -->|"gRPC h2c :5142"| crs["courses-api<br/>CoursesService<br/>L1 IMemoryCache + L2 Redis"]
+    agg -->|"gRPC h2c :5311"| rev["reviews-api<br/>ReviewsService<br/>HybridCache L1 + L2"]
+    agg -. "кеш картки 30 с" .-> redis[("redis")]
+    crs -. "L2" .-> redis
+    rev -. "L2" .-> redis
+    enr --> sql[("sql")]
+    crs --> sql
+    rev --> mongo[("mongo")]
+```
+
+### Redis і endpoint-и в AppHost
+
+```csharp
+var redis = builder.AddRedis("redis").WithDataVolume();       // кеш переживає перезапуск
+
+var courses = builder.AddProject<Projects.Courses_Api>("courses-api")
+    .WithReference(coursesDb).WaitFor(coursesDb)
+    .WithReference(redis).WaitFor(redis)                      // ConnectionStrings:redis
+    .WithHttpHealthCheck("/health");
+// так само reviews-api і aggregator; enrollments-api кешу не має (див. нижче)
+```
+
+gRPC працює поверх HTTP/2. REST для Gateway лишився на HTTP/1.1, а для gRPC без TLS потрібен окремий endpoint **лише з HTTP/2** (h2c). Його описано в `appsettings.json` кожного сервісу. Aspire читає розділ `Kestrel:Endpoints`, створює однойменні endpoint-и й сам призначає їм порти:
+
+```json
+"Kestrel": {
+  "Endpoints": {
+    "http": { "Url": "http://localhost:5141" },
+    "grpc": { "Url": "http://localhost:5142", "Protocols": "Http2" }
+  }
+}
+```
+
+| Сервіс | REST (`http`) | gRPC (`grpc`, HTTP/2) | Кеш |
+|---|---|---|---|
+| enrollments-api | 5209 | 5210 | — |
+| courses-api | 5141 | 5142 | L1 + L2, ручна реалізація |
+| reviews-api | 5310 | 5311 | HybridCache (L1 + L2) |
+| aggregator | 5055 | — (клієнт) | Redis, агреговані відповіді |
+
+Aggregator звертається до `http://_grpc.courses-api`: префікс `_grpc.` каже service discovery взяти саме endpoint `grpc`. Через `Kestrel:Endpoints` профіль `https` у `launchSettings.json` сервісів більше не діє, бо HTTPS-endpoint у цьому розділі не описано.
+
+### Кешування в каталозі курсів (Courses, ручна реалізація)
+
+Код лежить у `Services/Courses/Courses.Bll/Caching/`:
+
+| Файл | Що робить |
+|---|---|
+| `TwoLevelCache.cs` | cache-aside L1 (`IMemoryCache`) → L2 (`IDistributedCache`, Redis) → база; рівні заповнюються на зворотному шляху; інвалідація; ключ-версія; пауза L2 після помилки Redis |
+| `CacheKeys.cs` | схема ключів `courses:course:{id}`, `courses:categories:all`, `courses:list:v{версія}:{хеш параметрів}`, `courses:list:version` |
+| `CacheEntryPolicy.cs` | TTL за типом даних; `Validate()` гарантує, що L1 коротший за L2 |
+| `CacheMetrics.cs` | Meter `Courses.Cache`: `cache.hits`, `cache.misses` (тег `cache.level` = `L1`/`L2`), `cache.hit_ratio`, `cache.invalidations`, `cache.evictions`, `cache.l2.errors`, `cache.operation.duration`, `cache.l1.entries`, `cache.l1.size` |
+| `CacheWarmupService.cs` | прогрівання під час старту й раз на 10 хв: довідник категорій і 20 найкращих опублікованих курсів |
+| `CacheHealthCheck.cs` | статистика кешу в `/health`: записи й розмір L1, частка попадань L1 і L2 |
+
+У `Program.cs` L1 обмежено за розміром, а L2 підключено через Aspire-інтеграцію:
+
+```csharp
+builder.Services.AddMemoryCache(options =>
+{
+    options.SizeLimit = 10_000;            // одиниці = KiB JSON запису, разом ≈ 10 МБ
+    options.CompactionPercentage = 0.2;    // при переповненні витісняється 20 %, спершу Low-пріоритет
+    options.TrackStatistics = true;
+});
+builder.AddRedisDistributedCache("redis", configureOptions: redis => redis.BacklogPolicy = BacklogPolicy.FailFast /* ... */);
+```
+
+| Дані | Ключ | L1 | L2 (Redis) | Пріоритет L1 |
+|---|---|---|---|---|
+| картка курсу (REST і gRPC) | `courses:course:{id}` | sliding 2 хв, absolute 5 хв | 30 хв | Normal |
+| довідник категорій | `courses:categories:all` | absolute 10 хв | 1 год | High |
+| сторінка каталогу з фільтрами | `courses:list:v{версія}:{хеш}` | 1 хв | 5 хв | Low |
+| версія списків | `courses:list:version` | 5 с | 1 доба | High |
+
+Сторінок списку з різними фільтрами може бути безліч, тому їх не перелічують. Після запису змінюється **ключ-версія**, і старі ключі просто перестають читатися.
+
+Кожен запис після `SaveChangesAsync` синхронно видаляє пов'язані ключі, ще до відповіді клієнту. Причина й ключі логуються:
+
+| Операція | Картка | Списки (версія) | Категорії |
+|---|---|---|---|
+| `POST /api/courses` | ✓ | ✓ | ✓ |
+| `PUT .../price`, `publish`, `unpublish` | ✓ | ✓ | |
+| `POST .../lessons` | ✓ | | |
+| `POST .../categories`, `DELETE` | ✓ | ✓ | ✓ |
+| `POST /api/categories` | | | ✓ |
+
+```text
+Cache miss "courses:course:4", loading from the database
+Cache filled "courses:course:4": 1187 bytes, L1 TTL 00:05:00, L2 TTL 00:30:00
+Cache invalidated ["courses:course:4"], reason "CoursePriceChanged"
+Cache version "courses:list:version" bumped to 639... , reason "CoursePriceChanged"
+```
+
+`Caching:Enabled = false` в `appsettings.json` (або змінна `Caching__Enabled=false`) повністю вимикає кеш, і кожне читання йде в базу. Цей перемикач потрібен для чесного порівняння HTTP і gRPC.
+
+### Кешування відгуків (Reviews, HybridCache)
+
+Для порівняння з ручною реалізацією Reviews використовує готовий `HybridCache` (`Microsoft.Extensions.Caching.Hybrid`). Він теж дворівневий: L1 — `IMemoryCache`, L2 — зареєстрований `IDistributedCache` (Redis). Додатково він захищає від stampede (одночасні промахи того самого ключа зводяться до одного звернення до MongoDB) і вміє інвалідацію за тегами.
+
+Кеш підключено до CQRS через behavior (`Reviews.Application/Caching/`), обробники запитів про кеш не знають:
+
+```text
+Tracing -> Logging -> Validation -> Caching -> Performance -> обробник
+```
+
+- Запит, що реалізує `ICacheableQuery`, віддає ключ, теги й TTL. Це `GetCourseRatingQuery` (`reviews:rating:{courseId}`, L1 1 хв / L2 10 хв) і `GetReviewsListQuery` для сторінок одного курсу (`reviews:list:course:{id}:...`, 30 с / 5 хв). Пошук і відгуки конкретного студента не кешуються: варіантів необмежено, а дані студента персональні.
+- `CreateReview`, `UpdateReview`, `DeleteReview` і `AddComment` після запису викликають `IReviewsCacheInvalidator`, а той — `RemoveByTagAsync("reviews:course:{id}")`.
+- HybridCache виконує фабрику без `ExecutionContext` виклику. `CachingBehavior` відновлює його, інакше spans MongoDB ставали б окремими traces, а логи втрачали б `CorrelationId`.
+
+| | Courses — вручну | Reviews — HybridCache |
+|---|---|---|
+| Коду (з коментарями) | 460 рядків, 8 файлів | 210 рядків, 5 файлів (behavior, інвалідація, ключі, метрики) |
+| Видно, з якого рівня значення | так (`L1` / `L2` у метриках і spans) | ні — лише hit / miss (`cache.level = hybrid`) |
+| Захист від stampede | немає | вбудований |
+| Групова інвалідація | ключ-версія | теги |
+| Поведінка, коли Redis недоступний | пауза L2 на 15 с, далі L1 + база | винятки HybridCache перехоплює `CachingBehavior` → база |
+
+**Enrollments не кешує нічого.** Замовлення — це персональні дані зі статусом, що часто змінюється (`Submitted → Paid → AccessGranted`). Лаба радить такі дані не кешувати або тримати з дуже коротким TTL. Прискорення видно на рівні агрегатора.
+
+### gRPC-контракти й сервіси
+
+| Контракт | Сервіс (сервер) | RPC |
+|---|---|---|
+| `Services/Enrollments/Enrollments.Api/Protos/enrollments.proto` | `Enrollments.Api/Grpc/OrdersGrpcService` | `GetOrder`, `GetCourseSales` |
+| `Services/Courses/Courses.Api/Protos/courses.proto` | `Courses.Api/Grpc/CoursesGrpcService` | `GetCourse`, `GetCoursesByIds` |
+| `Services/Reviews/Reviews.WebApi/Protos/reviews.proto` | `Reviews.WebApi/Grpc/ReviewsGrpcService` | `GetCourseRating`, `GetCoursesFeedback` |
+
+- `proto3`, `package` за предметною областю, `option csharp_namespace`, коментарі (вони потрапляють у згенерований код), `import "google/protobuf/timestamp.proto"` для дат.
+- Гроші передаються як `DecimalValue { int64 units; sfixed32 nanos; }`, а не `double`, тож точність decimal не губиться. Необов'язкові поля оголошено як `optional`, щоб «не задано» відрізнялося від `0` / `false`.
+- Пакетні методи (`GetCoursesByIds`, `GetCoursesFeedback`) замінюють N паралельних HTTP-запитів Лаб. 05 одним викликом.
+- Контракт замовлення свідомо не містить платіжного імені й email: агрегатору потрібен лише спосіб оплати.
+- Підключення: у сервісі `<Protobuf Include="Protos\courses.proto" GrpcServices="Server" />`, в Aggregator — той самий файл через `Include="..\Services\...\courses.proto" GrpcServices="Client"`. Файл один, тож клієнт і сервер не можуть розійтися.
+
+gRPC-сервіс — такий самий адаптер над BLL, як контролер. Він перевіряє вхідні дані, викликає ті самі `ICourseService` / MediatR (а отже, і той самий кеш), перетворює DTO на повідомлення, а доменні винятки — на `RpcException` з точним кодом:
+
+| Виняток | Код gRPC |
+|---|---|
+| `Id <= 0`, порожній або завеликий список, `ValidationException` | `InvalidArgument` |
+| `EntityNotFoundException`, `NotFoundException` | `NotFound` |
+| `ConflictException`, `DomainException`, `BusinessConflictException` | `FailedPrecondition` |
+| MongoDB недоступна | `Unavailable` |
+| будь-що інше | `Internal` без деталей (повний стек — у лозі interceptor-а) |
+
+Реєстрація в `Program.cs` кожного сервісу:
+
+```csharp
+builder.Services.AddGrpc(options => options.Interceptors.Add<GrpcLoggingInterceptor>());
+// ...
+app.MapGrpcService<CoursesGrpcService>();
+```
+
+### Aggregator на gRPC
+
+```csharp
+builder.Services.AddGrpcClient<OrdersService.OrdersServiceClient>(o => o.Address = new("http://_grpc.enrollments-api"));
+builder.Services.AddGrpcClient<CoursesService.CoursesServiceClient>(o => o.Address = new("http://_grpc.courses-api"));
+builder.Services.AddGrpcClient<ReviewsService.ReviewsServiceClient>(o => o.Address = new("http://_grpc.reviews-api"));
+```
+
+- Фабрика gRPC-клієнтів будує їх на `IHttpClientFactory`, тому `ConfigureHttpClientDefaults` з ServiceDefaults діє без змін: service discovery, resilience і **`CorrelationIdHandler`**. Останній додає `X-Correlation-Id` у заголовки HTTP/2, тобто в метадані gRPC-виклику, без жодного коду в Aggregator. Один канал HTTP/2 на сервіс мультиплексує паралельні виклики.
+- `Clients/*Client.cs` — обгортки над згенерованими клієнтами (`GrpcUpstream`). Вони логують кожен виклик, задають deadline 4 с, `NotFound` перетворюють на `null` і повертають ті самі DTO, що й у Лаб. 05. `OrderCardService` і `DtoMapping` майже не змінилися.
+- `AggregationContext.SafeAsync` тепер перехоплює `RpcException` зі статусом `Unavailable`, `DeadlineExceeded`, `Internal`, `Unknown` або `ResourceExhausted` і перетворює її на попередження. Помилки самого запиту (`InvalidArgument`) не ковтаються: це баг агрегатора, а не недоступність сервісу.
+
+**Кеш агрегованих відповідей** (`Platform.Aggregator/Caching/AggregateCache.cs`):
+
+- ключі `aggregator:order:{id}:full` і `aggregator:course:{id}:overview`, TTL **30 с**;
+- кеш перевіряється **до** паралельних gRPC-викликів;
+- часткові відповіді (з `warnings`) не кешуються;
+- TTL агрегатора коротший за кеші сервісів (хвилини), інакше склеєна відповідь виглядала б «свіжішою», ніж дані, з яких її зібрано;
+- явної інвалідації немає, бо агрегатор не знає про записи в сервісах; узгодженість дає короткий TTL;
+- у відповіді є заголовок `X-Cache: HIT | MISS | BYPASS`, а `Cache-Control: no-cache` у запиті оминає кеш.
+
+### Обсервабіліті
+
+- **Traces.** Ланцюжок у trace: `BuildOrderCard` → span `Grpc.Net.Client` (клієнт, `grpc.method`, `grpc.status_code`) → `HTTP POST` → серверний span `POST /courses.CoursesService/GetCoursesByIds` → `cache GetOrCreate` / SQL / MongoDB. Батько–нащадок зв'язуються через `traceparent` у метаданих. На серверному span `GrpcLoggingInterceptor` дописує `rpc.system`, `rpc.service`, `rpc.method`, `rpc.grpc.status_code`, а `CorrelationIdMiddleware` — `correlation.id`. Redis-команди видно окремими spans (`HMGET`, `HMSET`, `EXPIRE`).
+- **Logs.** `GrpcLoggingInterceptor` (`Platform.ServiceDefaults/Grpc/`) пише кожен вхідний виклик структуровано: `gRPC {GrpcMethod} from {GrpcPeer}: {GrpcStatus} in {ElapsedMs} ms`. Очікувані відмови йдуть як `Warning`, несподівані — як `Error` зі стеком. Операції кешу логуються з `CacheKey`, `CacheLevel`, `SizeBytes`, `L1Ttl`/`L2Ttl`, `CacheKeys` і `InvalidationReason`.
+- **Metrics.** ServiceDefaults підписаний на метри `*.Cache`: `Courses.Cache`, `Reviews.Cache` і `Platform.Aggregator.Cache`. У Dashboard: Metrics → ресурс `courses-api` → `Courses.Cache` → `cache.hits`, з фільтром за `cache.level`.
+
+### Redis недоступний
+
+Redis — прискорювач, а не залежність. Клієнт налаштовано на `BacklogPolicy.FailFast` і таймаути 1–2 с: без цього StackExchange.Redis ставить команди в чергу до 5 с, і кожен запит чекав би секунди. Перевірено так: Dashboard → `redis` → **Stop**.
+
+| | Redis працює | Redis зупинено |
+|---|---|---|
+| `GET /api/courses/2` | 200 | 200 за 88 мс (перший), далі 7 мс — з L1 |
+| `GET /api/aggregator/orders/1/full` | 15 мс (`HIT`) | 200 за 99 мс (перший), далі 16–22 мс, `warnings` порожній |
+| `PUT /api/courses/2/price` | — | 204 за 29 мс; інвалідація L2 лише логується |
+
+Після **Start** Redis клієнт перепідключається сам. Записи, які за цей час не вдалося видалити з Redis, зникнуть за своїм TTL.
+
+### Порівняння HTTP (Лаб. 05) і gRPC (Лаб. 06)
+
+Методика: 5 запитів на прогрів, потім 50 послідовних `GET /api/aggregator/orders/1/full` через Gateway, на тій самій машині й з тими самими даними. Час end-to-end міряє клієнт, час кожного сервісу — сам агрегатор (`sources[].elapsedMs`). Для чистого транспорту кеш сервісів вимкнено (`Caching__Enabled=false`), а кеш агрегатора оминається (`Cache-Control: no-cache`).
+
+| Медіана, мс (p90) | Лаб. 05 HTTP | Лаб. 06 gRPC, без кешу | Лаб. 06 gRPC + кеш сервісів | Лаб. 06 + кеш агрегатора |
+|---|---|---|---|---|
+| **end-to-end** | **38.3** (89.4) | **30.2** (37.6) | **29.6** (32.0) | **15.2** (21.9) |
+| enrollments-api | 7.6 | 5.9 | 6.2 | — |
+| courses-api | 14.9 | 12.7 | 3.9 | — |
+| reviews-api | 14.3 | 4.5 | 4.8 | — |
+
+- **Сам транспорт** дає −21 % медіани й удвічі менший p90: стабільне HTTP/2-з'єднання без нових з'єднань і менше серіалізації (protobuf замість JSON). Найчистіше це видно на enrollments-api (7.6 → 5.9 мс), де виклик один і в обох версіях без кешу.
+- **reviews-api** прискорився найбільше (14.3 → 4.5 мс): чотири HTTP-запити (рейтинг і відгуки для двох курсів) перетворилися на один пакетний RPC `GetCoursesFeedback`. Це заслуга контракту, а не лише протоколу.
+- **Кеш сервісів** прибирає SQL із виклику courses-api (12.7 → 3.9 мс), а **кеш агрегатора** — усі gRPC-виклики (15 мс, решта — це Gateway і серіалізація відповіді).
+
+### Перевірка
+
+```powershell
+# повторний запит того самого курсу: у trace другого немає SQL-span (лише "cache GetOrCreate")
+curl.exe -H "X-Correlation-Id: course-1" http://localhost:5000/api/courses/4
+curl.exe -H "X-Correlation-Id: course-2" http://localhost:5000/api/courses/4
+
+# PUT -> наступний GET повертає нову ціну, а не значення з кешу
+curl.exe -X PUT http://localhost:5000/api/courses/4/price -H "Content-Type: application/json" -d '{\"price\":1450}'
+curl.exe http://localhost:5000/api/courses/4
+
+# агрегатор: перший — X-Cache: MISS, другий — HIT; no-cache — BYPASS (чиста gRPC-агрегація)
+curl.exe -i http://localhost:5000/api/aggregator/orders/1/full
+curl.exe -i -H "Cache-Control: no-cache" http://localhost:5000/api/aggregator/orders/1/full
+
+# gRPC NOT_FOUND -> агрегатор відповідає 404, а не 500
+curl.exe -i http://localhost:5000/api/aggregator/courses/99999/overview
+```
+
+Зупинка `courses-api` в Dashboard дає часткову відповідь з `courses-api is unavailable`, як і в Лаб. 05. Номер поля контракту можна перевірити, змінивши його лише в серверній копії. `.proto` один на сервер і клієнт, тож для експерименту поле треба тимчасово перенумерувати в копії файлу, підключеній до Aggregator. Після цього клієнт отримує значення не в тому полі або не отримує зовсім, бо в бінарному форматі передаються номери, а не імена.
+
+Тести: 206 (Courses 75, Reviews 95, Enrollments 36). Нові тести — `Courses.Tests/CachingTests.cs` і `Reviews.Tests/CachingTests.cs`:
+- L1 hit без звернення до бази;
+- L1 miss → L2 → заповнення L1;
+- інвалідація обох рівнів;
+- PUT → GET повертає нову ціну;
+- Redis кидає винятки → дані з бази;
+- вимкнений кеш;
+- L1 TTL < L2 TTL;
+- новий відгук інвалідує рейтинг;
+- пошук і відгуки студента не кешуються.
+
+### Знімки екрана
+
+Ресурси: Redis і по два endpoint-и в кожного сервісу (gRPC і REST):
+
+![Aspire Dashboard: ресурси з Redis](docs/screenshots/lab06-resources.png)
+
+Повторний запит курсу: лише `cache GetOrCreate` за 0.17 мс, без SQL і без Redis (попадання в L1):
+
+![Trace повторного запиту без SQL-span](docs/screenshots/lab06-cache-hit-trace.png)
+
+Перший запит після PUT: промах — Redis `HMGET`, SQL `SELECT`, запис у Redis `HMSET` + `EXPIRE`:
+
+![Trace промаху кешу: Redis, SQL, запис у Redis](docs/screenshots/lab06-cache-miss-trace.png)
+
+Агрегувальний запит через gRPC: `BuildOrderCard` → три клієнтські spans `Grpc.Net.Client` → серверні spans; courses-api і reviews-api паралельно. Праворуч — серверний span `GetCoursesByIds`: `network.protocol.version 2`, `rpc.*`, `correlation.id` з метаданих:
+
+![Trace агрегувального запиту з gRPC-spans](docs/screenshots/lab06-grpc-trace.png)
+
+Метрика попадань у кеш `cache.hits` з тегом `cache.level` (L1 / L2):
+
+![Метрика cache.hits у Dashboard](docs/screenshots/lab06-cache-metrics.png)
+
+Лог інвалідації після PUT зі структурованими `CacheKeys` і `InvalidationReason`:
+
+![Structured logs: інвалідація кешу](docs/screenshots/lab06-cache-logs.png)
+
 ## Контексти та бази даних
 
 Систему поділено на три незалежні контексти (Bounded Contexts). Кожен має власну базу; кожна сутність належить рівно одному контексту.
@@ -1172,27 +1446,27 @@ erDiagram
 README.md                  опис домену, запуск, розгортання БД, таблиця дублювання, ERD
 Platform.slnx              одне рішення на всю платформу
 Platform.AppHost/          оркестрація .NET Aspire (AppHost.cs): бази, сервіси, Aggregator, Gateway
-Platform.ServiceDefaults/  Extensions.cs (Serilog, OpenTelemetry, resilience, health), CorrelationIdMiddleware, CorrelationIdHandler
+Platform.ServiceDefaults/  Extensions.cs (Serilog, OpenTelemetry, resilience, health), CorrelationIdMiddleware, CorrelationIdHandler, Grpc/GrpcLoggingInterceptor
 Platform.ApiGateway/       YARP: маршрути й кластери в appsettings.json, Logging/ (лог маршрутизації, метрики)
-Platform.Aggregator/       Clients/ (typed HttpClients), Services/ (агрегація, часткові відмови), Models/ (композитні DTO)
+Platform.Aggregator/       Clients/ (обгортки gRPC-клієнтів), Caching/ (кеш агрегованих відповідей у Redis), Services/ (агрегація, часткові відмови), Models/ (композитні DTO)
 Services/
   Enrollments/             Проєкт №1 — ADO.NET + Dapper
-    Enrollments.Api/       контролери, Program.cs, appsettings.json, обробник помилок
+    Enrollments.Api/       контролери, Protos/enrollments.proto, Grpc/ (gRPC-сервіс), Program.cs, appsettings.json, обробник помилок
     Enrollments.Bll/       сервіси, DTO, профілі AutoMapper, бізнес-правила
     Enrollments.Dal/       інтерфейси й реалізації репозиторіїв, Unit of Work
     Enrollments.Domain/    моделі, статуси, доменні винятки
     Enrollments.Tests/     unit-тести BLL і API-тести
   Courses/                 Проєкт №2 — EF Core
-    Courses.Api/           контролери, Program.cs, appsettings.json, обробник помилок, Dockerfile
-    Courses.Bll/           сервіси, DTO, профілі AutoMapper, специфікації, валідатори
+    Courses.Api/           контролери, Protos/courses.proto, Grpc/ (gRPC-сервіс), Program.cs, appsettings.json, обробник помилок, Dockerfile
+    Courses.Bll/           сервіси, DTO, профілі AutoMapper, специфікації, валідатори, Caching/ (L1 + L2, метрики, прогрівання)
     Courses.Dal/           DbContext, Configurations/, Migrations/, репозиторії, Unit of Work, Seeding/
     Courses.Domain/        сутності з бізнес-правилами, доменні винятки
     Courses.Tests/         тести домену, специфікацій, валідаторів, сервісів, моделі EF та API
   Reviews/                 Проєкт №3 — Clean Architecture + CQRS + MongoDB
     Reviews.Domain/        сутності, value objects, перерахування, доменні винятки, інтерфейси репозиторіїв
-    Reviews.Application/   Commands/, Queries/, Common/Behaviors/, валідатори, DTO, профілі AutoMapper
+    Reviews.Application/   Commands/, Queries/, Common/Behaviors/, Caching/ (HybridCache, CachingBehavior), валідатори, DTO, профілі AutoMapper
     Reviews.Infrastructure/ Persistence/ (Mongo-контекст, BSON-мапінг, репозиторії, читання), Seeding/
-    Reviews.WebApi/        контролери, Program.cs, обробка помилок, appsettings.{Environment}.json
+    Reviews.WebApi/        контролери, Protos/reviews.proto, Grpc/ (gRPC-сервіс), Program.cs, обробка помилок, appsettings.{Environment}.json
     Reviews.Tests/         тести домену, behaviors, BSON-мапінгу, запитів, архітектури та API
 dotnet-tools.json          локальний інструмент dotnet-ef
 docs/
@@ -1342,4 +1616,4 @@ EXEC dbo.usp_ChangeOrderStatus @OrderId = 3, @NewStatus = N'AccessGranted';
 
 ## Що далі
 
-Сервіси об'єднано в платформу з єдиною точкою входу, наскрізним трасуванням і агрегацією. Наступна робота — Лаб. 06.
+Сервіси об'єднано в платформу з єдиною точкою входу, наскрізним трасуванням і агрегацією, а внутрішні виклики переведено на gRPC із кешуванням у пам'яті та Redis. Наступна робота — Лаб. 07 (власні метрики й політики стійкості).

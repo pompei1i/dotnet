@@ -9,6 +9,9 @@ public interface ICourseService
 
     Task<CourseDetailsDto> GetByIdAsync(long id, CancellationToken ct = default);
 
+    /// <summary>Картки кількох курсів за Id; відсутні курси до результату не потрапляють.</summary>
+    Task<IReadOnlyList<CourseDetailsDto>> GetByIdsAsync(IReadOnlyCollection<long> ids, CancellationToken ct = default);
+
     Task<CourseDetailsDto> CreateAsync(CreateCourseDto input, CancellationToken ct = default);
 
     Task ChangePriceAsync(long id, ChangePriceDto input, CancellationToken ct = default);

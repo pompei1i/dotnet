@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using MongoDB.Bson;
 using NSubstitute;
+using Reviews.Application.Caching;
 using Reviews.Application.Common.Exceptions;
 using Reviews.Application.Discussions.Commands.ChangeDiscussionStatus;
 using Reviews.Application.Reviews.Commands.AddComment;
@@ -17,12 +18,13 @@ namespace Reviews.Tests;
 public class HandlerTests
 {
     private readonly IReviewRepository _reviews = Substitute.For<IReviewRepository>();
+    private readonly IReviewsCacheInvalidator _cache = Substitute.For<IReviewsCacheInvalidator>();
     private readonly IDiscussionRepository _discussions = Substitute.For<IDiscussionRepository>();
 
     [Fact]
     public async Task Create_adds_review_and_returns_dto_with_string_id()
     {
-        var handler = new CreateReviewCommandHandler(_reviews, TestData.CreateMapper(), NullLogger<CreateReviewCommandHandler>.Instance);
+        var handler = new CreateReviewCommandHandler(_reviews, TestData.CreateMapper(), _cache, NullLogger<CreateReviewCommandHandler>.Instance);
 
         var dto = await handler.Handle(new CreateReviewCommand(3, "EF Core", 9, "Дмитро", 4, null, null, ["Мало тестів"]), default);
 
@@ -37,7 +39,7 @@ public class HandlerTests
     {
         var review = TestData.Review();
         _reviews.GetByIdAsync(review.Id, Arg.Any<CancellationToken>()).Returns(review);
-        var handler = new UpdateReviewCommandHandler(_reviews, TestData.CreateMapper(), NullLogger<UpdateReviewCommandHandler>.Instance);
+        var handler = new UpdateReviewCommandHandler(_reviews, TestData.CreateMapper(), _cache, NullLogger<UpdateReviewCommandHandler>.Instance);
 
         await Assert.ThrowsAsync<ConflictException>(() =>
             handler.Handle(new UpdateReviewCommand(review.Id.ToString(), 3, null, null, null, ExpectedVersion: 5), default));
@@ -50,7 +52,7 @@ public class HandlerTests
     {
         var review = TestData.Review();
         _reviews.GetByIdAsync(review.Id, Arg.Any<CancellationToken>()).Returns(review);
-        var handler = new UpdateReviewCommandHandler(_reviews, TestData.CreateMapper(), NullLogger<UpdateReviewCommandHandler>.Instance);
+        var handler = new UpdateReviewCommandHandler(_reviews, TestData.CreateMapper(), _cache, NullLogger<UpdateReviewCommandHandler>.Instance);
 
         var dto = await handler.Handle(new UpdateReviewCommand(review.Id.ToString(), 3, "Новий текст", null, null, ExpectedVersion: 1), default);
 
@@ -65,7 +67,7 @@ public class HandlerTests
         var deleted = TestData.Review();
         deleted.Delete();
         _reviews.GetByIdAsync(deleted.Id, Arg.Any<CancellationToken>()).Returns(deleted);
-        var handler = new DeleteReviewCommandHandler(_reviews, NullLogger<DeleteReviewCommandHandler>.Instance);
+        var handler = new DeleteReviewCommandHandler(_reviews, _cache, NullLogger<DeleteReviewCommandHandler>.Instance);
 
         await Assert.ThrowsAsync<NotFoundException>(() => handler.Handle(new DeleteReviewCommand(deleted.Id.ToString(), null), default));
         await Assert.ThrowsAsync<NotFoundException>(() => handler.Handle(new DeleteReviewCommand(ObjectId.GenerateNewId().ToString(), null), default));
@@ -77,7 +79,7 @@ public class HandlerTests
         var review = TestData.Review();
         _reviews.GetByIdAsync(review.Id, Arg.Any<CancellationToken>()).Returns(review);
         _reviews.UpdateAsync(review, Arg.Any<CancellationToken>()).Returns(_ => throw new ConflictException("modified"));
-        var handler = new AddCommentCommandHandler(_reviews, TestData.CreateMapper(), NullLogger<AddCommentCommandHandler>.Instance);
+        var handler = new AddCommentCommandHandler(_reviews, TestData.CreateMapper(), _cache, NullLogger<AddCommentCommandHandler>.Instance);
 
         await Assert.ThrowsAsync<ConflictException>(() =>
             handler.Handle(new AddCommentCommand(review.Id.ToString(), 1, "instructor", "Андрій", "Дякую"), default));
@@ -88,7 +90,7 @@ public class HandlerTests
     {
         var review = TestData.Review();
         _reviews.GetByIdAsync(review.Id, Arg.Any<CancellationToken>()).Returns(review);
-        var handler = new AddCommentCommandHandler(_reviews, TestData.CreateMapper(), NullLogger<AddCommentCommandHandler>.Instance);
+        var handler = new AddCommentCommandHandler(_reviews, TestData.CreateMapper(), _cache, NullLogger<AddCommentCommandHandler>.Instance);
 
         var dto = await handler.Handle(new AddCommentCommand(review.Id.ToString(), 1, "Instructor", "Андрій", "Дякую"), default);
 

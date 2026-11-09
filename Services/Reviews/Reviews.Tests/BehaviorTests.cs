@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NSubstitute;
 using Reviews.Application;
+using Reviews.Application.Caching;
 using Reviews.Application.Common.Behaviors;
 using Reviews.Application.Reviews.Commands.CreateReview;
 using Reviews.Application.Reviews.Dtos;
@@ -38,7 +39,7 @@ public class BehaviorTests
             .Select(b => b.GetType().GetGenericTypeDefinition())
             .ToList();
 
-        Assert.Equal([typeof(TracingBehavior<,>), typeof(LoggingBehavior<,>), typeof(ValidationBehavior<,>), typeof(PerformanceBehavior<,>)], behaviors);
+        Assert.Equal([typeof(TracingBehavior<,>), typeof(LoggingBehavior<,>), typeof(ValidationBehavior<,>), typeof(CachingBehavior<,>), typeof(PerformanceBehavior<,>)], behaviors);
     }
 
     [Fact]

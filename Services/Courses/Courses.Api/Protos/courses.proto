@@ -1,0 +1,71 @@
+// gRPC-контракт каталогу курсів (Лаб. 06) для внутрішніх сервісів платформи — насамперед Aggregator.
+// Зовнішні клієнти й далі працюють через REST (Gateway); gRPC слухає окремий endpoint "grpc" (HTTP/2).
+//
+// Сумісність: номери полів після публікації НЕ змінюються — у бінарному форматі передаються саме
+// номери, а не імена. Нове поле дістає новий номер; видалене поле — reserved, щоб номер не взяли повторно.
+syntax = "proto3";
+
+option csharp_namespace = "Courses.Grpc";
+
+package courses;
+
+import "google/protobuf/timestamp.proto";
+
+// Читання каталогу. Обидва методи йдуть через той самий ICourseService, що й REST-контролер,
+// тож користуються тим самим дворівневим кешем (L1 пам'ять -> L2 Redis -> база).
+service CoursesService {
+  // Картка одного курсу. Неіснуючий Id -> NOT_FOUND, Id <= 0 -> INVALID_ARGUMENT.
+  rpc GetCourse (GetCourseRequest) returns (CourseReply);
+
+  // Картки кількох курсів одним викликом (замість N паралельних HTTP-запитів у Лаб. 05).
+  // Курси, яких немає, у відповідь не потрапляють — клієнт порівнює Id із запитаними.
+  rpc GetCoursesByIds (GetCoursesByIdsRequest) returns (CoursesReply);
+}
+
+message GetCourseRequest {
+  int64 id = 1;
+}
+
+message GetCoursesByIdsRequest {
+  // Від 1 до 100 додатних Id; дублікати ігноруються
+  repeated int64 ids = 1;
+}
+
+message CoursesReply {
+  repeated CourseReply courses = 1;
+}
+
+message CourseReply {
+  int64 id = 1;
+  string title = 2;
+  string slug = 3;
+  // Поточна ціна в каталозі. Гроші — не double: decimal без втрати точності (units + nanos)
+  DecimalValue price = 4;
+  // Beginner | Intermediate | Advanced
+  string level = 5;
+  // Код мови, наприклад "uk"
+  string language = 6;
+  bool is_published = 7;
+  // Не задано, поки курс не опубліковано
+  google.protobuf.Timestamp published_at = 8;
+  InstructorReply instructor = 9;
+  // Опис курсу може бути ще не заповнений — тоді обидва поля відсутні (optional, а не 0 / false)
+  optional DecimalValue duration_hours = 10;
+  optional bool has_certificate = 11;
+  int32 lessons_count = 12;
+  // Середня оцінка з каталогу; відсутня, якщо відгуків ще немає
+  optional double average_rating = 13;
+  int32 reviews_count = 14;
+}
+
+message InstructorReply {
+  int64 id = 1;
+  string full_name = 2;
+}
+
+// decimal для protobuf: значення = units + nanos / 1e9 (рекомендований Microsoft спосіб передати decimal).
+// Приклад: 1800.50 -> units = 1800, nanos = 500000000.
+message DecimalValue {
+  int64 units = 1;
+  sfixed32 nanos = 2;
+}

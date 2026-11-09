@@ -38,7 +38,7 @@ public class CourseServiceTests
         _categories.GetByIdsAsync(Arg.Any<IReadOnlyCollection<int>>(), Arg.Any<CancellationToken>())
             .Returns([TestData.Category(1), TestData.Category(3, "Бази даних")]);
 
-        _service = new CourseService(_uow, CreateMapper(), NullLogger<CourseService>.Instance);
+        _service = new CourseService(_uow, CreateMapper(), TestCache.Create().Cache, NullLogger<CourseService>.Instance);
     }
 
     private static CreateCourseDto NewCourse() => new()

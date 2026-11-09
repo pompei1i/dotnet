@@ -1,0 +1,61 @@
+// gRPC-контракт сервісу замовлень (Лаб. 06) для внутрішніх сервісів — насамперед Aggregator.
+// Номери полів після публікації не змінюються: саме вони визначають бінарний формат повідомлення.
+syntax = "proto3";
+
+option csharp_namespace = "Enrollments.Grpc";
+
+package enrollments;
+
+import "google/protobuf/timestamp.proto";
+
+service OrdersService {
+  // Замовлення з позиціями. Неіснуючий Id -> NOT_FOUND, Id <= 0 -> INVALID_ARGUMENT
+  rpc GetOrder (GetOrderRequest) returns (OrderReply);
+
+  // Продажі курсу: кількість оплачених замовлень і виручка. Курсу немає в довіднику -> NOT_FOUND
+  rpc GetCourseSales (GetCourseSalesRequest) returns (CourseSalesReply);
+}
+
+message GetOrderRequest {
+  int64 id = 1;
+}
+
+message GetCourseSalesRequest {
+  int64 course_id = 1;
+}
+
+// Агрегатору потрібен лише спосіб оплати; платіжне ім'я й email (персональні дані) у контракт
+// свідомо не входять — що менше полів, то менше даних іде мережею.
+message OrderReply {
+  int64 id = 1;
+  int64 student_id = 2;
+  // Submitted | Paid | AccessGranted | Cancelled | Refunded
+  string status = 3;
+  google.protobuf.Timestamp order_date = 4;
+  DecimalValue total_amount = 5;
+  // Відсутній, якщо реквізити оплати ще не заповнено
+  optional string payment_method = 6;
+  repeated OrderItemReply items = 7;
+}
+
+// Ціна й знижка — знімок на момент оформлення замовлення
+message OrderItemReply {
+  int64 course_id = 1;
+  string course_title = 2;
+  DecimalValue unit_price = 3;
+  DecimalValue discount = 4;
+  DecimalValue line_total = 5;
+}
+
+message CourseSalesReply {
+  int64 course_id = 1;
+  string course_title = 2;
+  int32 orders_count = 3;
+  DecimalValue revenue = 4;
+}
+
+// decimal без втрати точності: значення = units + nanos / 1e9
+message DecimalValue {
+  int64 units = 1;
+  sfixed32 nanos = 2;
+}

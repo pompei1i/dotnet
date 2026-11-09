@@ -1,27 +1,34 @@
+using Courses.Grpc;
+
 namespace Platform.Aggregator.Clients;
 
-/// <summary>Typed-клієнт каталогу Courses (Лаб. 03): актуальні дані курсів.</summary>
-public sealed class CoursesClient(HttpClient http, ILogger<CoursesClient> logger) : UpstreamClient(http, logger)
+/// <summary>
+/// Клієнт каталогу Courses (Лаб. 03) поверх згенерованого gRPC-клієнта. Курси замовлення
+/// запитуються одним викликом GetCoursesByIds — у Лаб. 05 це було N паралельних HTTP-запитів.
+/// </summary>
+public sealed class CoursesClient(CoursesService.CoursesServiceClient grpc, ILogger<CoursesClient> logger) : GrpcUpstream(logger)
 {
     public override string ServiceName => "courses-api";
 
-    public Task<CourseResponse?> GetCourseAsync(long courseId, CancellationToken ct)
-        => GetAsync<CourseResponse>($"/api/courses/{courseId}", ct);
+    public async Task<CourseResponse?> GetCourseAsync(long courseId, CancellationToken ct)
+    {
+        var reply = await CallAsync("GetCourse", () => grpc.GetCourseAsync(new GetCourseRequest { Id = courseId }, Options(ct)));
+        return reply?.ToResponse();
+    }
 
-    /// <summary>
-    /// Курси за списком Id — паралельно, бо пакетного ендпоінта в каталозі немає.
-    /// Значення null — курсу з таким Id у каталозі немає (404).
-    /// </summary>
+    /// <summary>Курси за списком Id. Значення null — курсу з таким Id у каталозі немає.</summary>
     public async Task<IReadOnlyDictionary<long, CourseResponse?>> GetCoursesAsync(
         IReadOnlyCollection<long> courseIds, CancellationToken ct)
     {
-        var calls = courseIds.Select(async id => (Id: id, Course: await GetCourseAsync(id, ct)));
-        var results = await Task.WhenAll(calls);
-        return results.ToDictionary(result => result.Id, result => result.Course);
+        var reply = await CallAsync("GetCoursesByIds",
+            () => grpc.GetCoursesByIdsAsync(new GetCoursesByIdsRequest { Ids = { courseIds } }, Options(ct)));
+
+        var found = (reply?.Courses ?? []).ToDictionary(course => course.Id, course => course.ToResponse());
+        return courseIds.ToDictionary(id => id, id => found.GetValueOrDefault(id));
     }
 }
 
-// Відповідь courses-api (CourseDetailsDto) — лише поля, потрібні агрегатору
+// Дані каталогу, потрібні агрегатору (з protobuf-повідомлення CourseReply)
 
 public sealed record CourseResponse(
     long Id,
@@ -33,10 +40,26 @@ public sealed record CourseResponse(
     bool IsPublished,
     InstructorResponse Instructor,
     CourseDetailResponse? Detail,
-    IReadOnlyList<LessonResponse>? Lessons);
+    int LessonsCount);
 
 public sealed record InstructorResponse(long Id, string FullName);
 
 public sealed record CourseDetailResponse(decimal DurationHours, bool HasCertificate);
 
-public sealed record LessonResponse(long Id);
+internal static class CoursesMapping
+{
+    public static CourseResponse ToResponse(this CourseReply course) => new(
+        course.Id,
+        course.Title,
+        course.Slug,
+        course.Price.ToDecimal(),
+        course.Level,
+        course.Language,
+        course.IsPublished,
+        new InstructorResponse(course.Instructor.Id, course.Instructor.FullName),
+        // optional-поля proto3: Has* відрізняє «не задано» від 0 / false
+        course.DurationHours is not null && course.HasHasCertificate
+            ? new CourseDetailResponse(course.DurationHours.ToDecimal(), course.HasCertificate)
+            : null,
+        course.LessonsCount);
+}

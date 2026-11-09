@@ -1,4 +1,6 @@
 using Enrollments.Api.Controllers;
+using Enrollments.Api.Grpc;
+using Platform.ServiceDefaults.Grpc;
 using Enrollments.Bll.Mapping;
 using Enrollments.Bll.Services;
 using Enrollments.Dal;
@@ -36,6 +38,15 @@ builder.Services.AddAutoMapper(cfg =>
 
 builder.Services.AddControllers();
 
+// gRPC (Лаб. 06): серверний interceptor з ServiceDefaults логує кожен виклик; endpoint "grpc" (HTTP/2)
+// описано в Kestrel:Endpoints у appsettings.json. Замовлення — персональні дані з частими змінами
+// статусу, тому цей сервіс їх не кешує (див. README).
+builder.Services.AddGrpc(options =>
+{
+    options.Interceptors.Add<GrpcLoggingInterceptor>();
+    options.EnableDetailedErrors = builder.Environment.IsDevelopment();
+});
+
 // Помилки — у форматі ProblemDetails (RFC 9457), винятки перетворює один глобальний обробник
 builder.Services.AddProblemDetails(options => options.CustomizeProblemDetails = context =>
     context.ProblemDetails.Extensions["traceId"] = context.HttpContext.TraceIdentifier);
@@ -59,6 +70,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapControllers();
+app.MapGrpcService<OrdersGrpcService>();   // gRPC-API замовлень для Aggregator
 app.MapDefaultEndpoints();   // /health і /alive
 
 app.Run();

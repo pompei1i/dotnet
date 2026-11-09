@@ -10,7 +10,23 @@
     <ProjectReference Include="..\Platform.ServiceDefaults\Platform.ServiceDefaults.csproj" />
   </ItemGroup>
 
+  <!-- gRPC-контракти мікросервісів (Лаб. 06): ті самі .proto-файли, що й у сервісах, але генерується
+       лише клієнтська частина (CoursesService.CoursesServiceClient тощо). Один файл — одне джерело правди:
+       контракт не копіюється, тож клієнт і сервер не можуть розійтися -->
   <ItemGroup>
+    <Protobuf Include="..\Services\Enrollments\Enrollments.Api\Protos\enrollments.proto" GrpcServices="Client" Link="Protos\enrollments.proto" />
+    <Protobuf Include="..\Services\Courses\Courses.Api\Protos\courses.proto" GrpcServices="Client" Link="Protos\courses.proto" />
+    <Protobuf Include="..\Services\Reviews\Reviews.WebApi\Protos\reviews.proto" GrpcServices="Client" Link="Protos\reviews.proto" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Aspire.StackExchange.Redis.DistributedCaching" Version="13.6.1" />
+    <PackageReference Include="Google.Protobuf" Version="3.36.2" />
+    <PackageReference Include="Grpc.Net.ClientFactory" Version="2.85.0" />
+    <PackageReference Include="Grpc.Tools" Version="2.85.0">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.3.0" />
   </ItemGroup>
 

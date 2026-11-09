@@ -1,6 +1,7 @@
 using AutoMapper;
 using MediatR;
 using Microsoft.Extensions.Logging;
+using Reviews.Application.Caching;
 using MongoDB.Bson;
 using Reviews.Application.Common;
 using Reviews.Application.Common.Exceptions;
@@ -14,6 +15,7 @@ namespace Reviews.Application.Reviews.Commands.AddComment;
 public sealed class AddCommentCommandHandler(
     IReviewRepository reviews,
     IMapper mapper,
+    IReviewsCacheInvalidator cache,
     ILogger<AddCommentCommandHandler> logger) : IRequestHandler<AddCommentCommand, ReviewDto>
 {
     public async Task<ReviewDto> Handle(AddCommentCommand command, CancellationToken ct)
@@ -25,6 +27,7 @@ public sealed class AddCommentCommandHandler(
         var author = new Participant(command.UserId, EnumText.Parse<ParticipantRole>(command.Role), command.DisplayName);
         review.AddComment(author, command.Text);
         await reviews.UpdateAsync(review, ct);
+        await cache.InvalidateCourseAsync(review.CourseId, "CommentAdded", ct);   // CommentsCount у сторінках списку
 
         logger.LogInformation("Comment added to review {ReviewId} by {Role} {UserId}; {CommentsCount} comment(s) now",
             review.Id, command.Role, command.UserId, review.Comments.Count);

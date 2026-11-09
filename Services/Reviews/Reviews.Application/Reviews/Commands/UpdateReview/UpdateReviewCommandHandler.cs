@@ -1,6 +1,7 @@
 using AutoMapper;
 using MediatR;
 using Microsoft.Extensions.Logging;
+using Reviews.Application.Caching;
 using MongoDB.Bson;
 using Reviews.Application.Common;
 using Reviews.Application.Common.Exceptions;
@@ -13,6 +14,7 @@ namespace Reviews.Application.Reviews.Commands.UpdateReview;
 public sealed class UpdateReviewCommandHandler(
     IReviewRepository reviews,
     IMapper mapper,
+    IReviewsCacheInvalidator cache,
     ILogger<UpdateReviewCommandHandler> logger) : IRequestHandler<UpdateReviewCommand, ReviewDto>
 {
     public async Task<ReviewDto> Handle(UpdateReviewCommand command, CancellationToken ct)
@@ -25,6 +27,7 @@ public sealed class UpdateReviewCommandHandler(
 
         review.Edit(new Rating(command.Rating), command.Text, command.Pros, command.Cons);
         await reviews.UpdateAsync(review, ct);
+        await cache.InvalidateCourseAsync(review.CourseId, "ReviewUpdated", ct);
 
         logger.LogInformation("Review {ReviewId} updated to version {Version}", review.Id, review.Version);
         return mapper.Map<ReviewDto>(review);

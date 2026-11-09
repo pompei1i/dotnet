@@ -1,5 +1,6 @@
 using MediatR;
 using Microsoft.Extensions.Logging;
+using Reviews.Application.Caching;
 using MongoDB.Bson;
 using Reviews.Application.Common;
 using Reviews.Application.Common.Exceptions;
@@ -9,6 +10,7 @@ namespace Reviews.Application.Reviews.Commands.DeleteReview;
 
 public sealed class DeleteReviewCommandHandler(
     IReviewRepository reviews,
+    IReviewsCacheInvalidator cache,
     ILogger<DeleteReviewCommandHandler> logger) : IRequestHandler<DeleteReviewCommand>
 {
     public async Task Handle(DeleteReviewCommand command, CancellationToken ct)
@@ -21,6 +23,7 @@ public sealed class DeleteReviewCommandHandler(
 
         review.Delete();
         await reviews.UpdateAsync(review, ct);
+        await cache.InvalidateCourseAsync(review.CourseId, "ReviewDeleted", ct);
 
         logger.LogInformation("Review {ReviewId} deleted", review.Id);
     }

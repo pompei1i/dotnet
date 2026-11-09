@@ -1,20 +1,28 @@
+using Platform.Aggregator.Caching;
 using Platform.Aggregator.Clients;
 using Platform.Aggregator.Models;
 
 namespace Platform.Aggregator.Services;
 
 /// <summary>
-/// Aggregator Pattern — повна картка замовлення. Спершу замовлення (без нього агрегувати нічого),
-/// потім одночасно (Task.WhenAll) каталог і відгуки для курсів цього замовлення. Якщо один із
+/// Aggregator Pattern — повна картка замовлення. Спершу кеш агрегованої відповіді (Redis, 30 с),
+/// при промаху — замовлення (без нього агрегувати нічого), потім одночасно (Task.WhenAll) каталог і
+/// відгуки для курсів цього замовлення — gRPC-викликами (Лаб. 06), по одному на сервіс. Якщо один із
 /// сервісів недоступний, картка повертається з тим, що вдалося зібрати, і з попередженням у Warnings.
 /// </summary>
 public sealed class OrderCardService(
     EnrollmentsClient enrollments,
     CoursesClient courses,
     ReviewsClient reviews,
+    AggregateCache cache,
     ILogger<OrderCardService> logger)
 {
-    public async Task<OrderCardDto?> GetOrderCardAsync(long orderId, CancellationToken ct)
+    /// <summary>Кеш перевіряється ДО gRPC-викликів; часткова картка (з Warnings) не кешується.</summary>
+    public Task<OrderCardDto?> GetOrderCardAsync(long orderId, CancellationToken ct)
+        => cache.GetOrBuildAsync(AggregateCache.OrderCardKey(orderId), () => BuildOrderCardAsync(orderId, ct),
+            card => card.Warnings.Count == 0, ct);
+
+    private async Task<OrderCardDto?> BuildOrderCardAsync(long orderId, CancellationToken ct)
     {
         using var activity = AggregatorTelemetry.Source.StartActivity("BuildOrderCard");
         activity?.SetTag("order.id", orderId);

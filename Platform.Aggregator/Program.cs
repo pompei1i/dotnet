@@ -1,6 +1,11 @@
+using StackExchange.Redis;
 using System.Text.Json.Serialization;
+using Courses.Grpc;
+using Enrollments.Grpc;
 using Microsoft.Extensions.Http.Resilience;
+using Platform.Aggregator.Caching;
 using Platform.Aggregator.Clients;
+using Reviews.Grpc;
 using Platform.Aggregator.ErrorHandling;
 using Platform.Aggregator.Services;
 using Platform.ServiceDefaults;
@@ -11,11 +16,39 @@ var builder = WebApplication.CreateBuilder(args);
 // для всіх HttpClient — з ServiceDefaults
 builder.AddServiceDefaults();
 
-// Typed HttpClients. Адреса — логічне ім'я ресурсу з AppHost; "https+http" означає
-// «HTTPS, якщо сервіс його має, інакше HTTP». Реальний host:port підставляє service discovery.
-builder.Services.AddHttpClient<EnrollmentsClient>(client => client.BaseAddress = new("https+http://enrollments-api"));
-builder.Services.AddHttpClient<CoursesClient>(client => client.BaseAddress = new("https+http://courses-api"));
-builder.Services.AddHttpClient<ReviewsClient>(client => client.BaseAddress = new("https+http://reviews-api"));
+// ---------- gRPC-клієнти мікросервісів (Лаб. 06, замість typed HttpClient Лаб. 05) ----------
+// Типізовані клієнти згенеровано з .proto сервісів. Адреса — логічне ім'я ресурсу з AppHost:
+// "_grpc." вибирає endpoint "grpc" (HTTP/2 без TLS), реальний host:port підставляє service discovery.
+// Фабрика gRPC-клієнтів будує їх на IHttpClientFactory, тож ConfigureHttpClientDefaults з ServiceDefaults
+// діє і тут: service discovery, resilience і CorrelationIdHandler (X-Correlation-Id у метаданих виклику).
+// Канал HTTP/2 один на сервіс і живе довго: паралельні виклики мультиплексуються в одному з'єднанні.
+builder.Services.AddGrpcClient<OrdersService.OrdersServiceClient>(o => o.Address = new("http://_grpc.enrollments-api"));
+builder.Services.AddGrpcClient<CoursesService.CoursesServiceClient>(o => o.Address = new("http://_grpc.courses-api"));
+builder.Services.AddGrpcClient<ReviewsService.ReviewsServiceClient>(o => o.Address = new("http://_grpc.reviews-api"));
+
+// Обгортки над згенерованими клієнтами: логування, deadline, NOT_FOUND -> null
+builder.Services.AddScoped<EnrollmentsClient>();
+builder.Services.AddScoped<CoursesClient>();
+builder.Services.AddScoped<ReviewsClient>();
+
+// ---------- Кеш агрегованих відповідей (Лаб. 06) ----------
+// IDistributedCache поверх Redis через Aspire-інтеграцію; ConnectionStrings:redis передає AppHost.
+// Без Aspire — кеш у пам'яті процесу, щоб агрегатор запускався й окремо
+if (!string.IsNullOrEmpty(builder.Configuration.GetConnectionString("redis")))
+    builder.AddRedisDistributedCache("redis", configureOptions: redis =>
+    {
+        // Redis — прискорювач: якщо він недоступний, команди мають падати одразу (FailFast), а не стояти
+        // в черзі до timeout (5 с за замовчуванням), інакше кожен запит чекав би секунди замість мілісекунд
+        redis.BacklogPolicy = BacklogPolicy.FailFast;
+        redis.ConnectTimeout = 2000;
+        redis.AsyncTimeout = 1000;
+        redis.SyncTimeout = 1000;
+        redis.AbortOnConnectFail = false;
+    });
+else
+    builder.Services.AddDistributedMemoryCache();
+builder.Services.AddSingleton<AggregateCacheMetrics>();
+builder.Services.AddScoped<AggregateCache>();
 
 // Стандартний resilience-обробник (ServiceDefaults) за замовчуванням чекає до 30 с і робить 3 повтори
 // з паузами в секунди. Агрегатор має віддати часткову відповідь швидко: зупинений в Aspire сервіс
