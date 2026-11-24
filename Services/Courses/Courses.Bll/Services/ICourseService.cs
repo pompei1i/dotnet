@@ -16,6 +16,9 @@ public interface ICourseService
 
     Task ChangePriceAsync(long id, ChangePriceDto input, CancellationToken ct = default);
 
+    /// <summary>Перейменовує курс; подія course.renamed оновлює courseTitle у Відгуках і копію в Замовленнях.</summary>
+    Task RenameAsync(long id, ChangeTitleDto input, CancellationToken ct = default);
+
     Task PublishAsync(long id, CancellationToken ct = default);
 
     Task UnpublishAsync(long id, CancellationToken ct = default);

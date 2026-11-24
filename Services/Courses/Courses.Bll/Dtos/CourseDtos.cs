@@ -83,6 +83,12 @@ public class CreateCourseDto
     public int? PrimaryCategoryId { get; set; }
 }
 
+public class ChangeTitleDto
+{
+    [Required, StringLength(200, MinimumLength = 3)]
+    public string Title { get; set; } = "";
+}
+
 public class ChangePriceDto
 {
     [Range(0, 1_000_000)]

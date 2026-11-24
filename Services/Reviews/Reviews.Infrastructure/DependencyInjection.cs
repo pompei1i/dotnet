@@ -31,6 +31,7 @@ public static class DependencyInjection
         services.AddScoped<IDiscussionRepository, DiscussionRepository>();
         services.AddScoped<IReviewQueries, ReviewQueries>();
         services.AddScoped<IDiscussionQueries, DiscussionQueries>();
+        services.AddScoped<ICatalogSyncStore, CatalogSyncStore>();   // оновлення courseTitle за подіями Каталогу (Лаб. 08)
 
         // Порядок важливий: спершу індекси (унікальність), потім дані
         services.AddSingleton<IDataSeeder, ReviewSeeder>();

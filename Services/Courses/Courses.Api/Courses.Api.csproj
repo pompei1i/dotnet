@@ -15,6 +15,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Courses.Bll\Courses.Bll.csproj" />
     <ProjectReference Include="..\..\..\Platform.ServiceDefaults\Platform.ServiceDefaults.csproj" />
+    <ProjectReference Include="..\..\..\Platform.EventBus\Platform.EventBus.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -79,6 +79,25 @@ public class CoursesController(ICourseService courses, CatalogMetrics metrics) :
         return NoContent();
     }
 
+    /// <summary>Перейменовує курс (Лаб. 08): подія course.renamed оновлює назву в Замовленнях і Відгуках.</summary>
+    [HttpPut("{id:long}/title")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Rename(
+        long id,
+        ChangeTitleDto input,
+        [FromServices] IValidator<ChangeTitleDto> validator,
+        CancellationToken ct)
+    {
+        var validation = await validator.ValidateAsync(input, ct);
+        if (!validation.IsValid)
+            return ValidationProblem(new ValidationProblemDetails(validation.ToDictionary()));
+
+        await metrics.MeasureAsync("rename", () => courses.RenameAsync(id, input, ct));
+        return NoContent();
+    }
+
     /// <summary>Публікує курс; без опису або уроків — 409.</summary>
     [HttpPost("{id:long}/publish")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]

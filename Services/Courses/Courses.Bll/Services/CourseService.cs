@@ -1,6 +1,7 @@
 using AutoMapper;
 using Courses.Bll.Caching;
 using Courses.Bll.Diagnostics;
+using Courses.Bll.Events;
 using Courses.Bll.Dtos;
 using Courses.Bll.Specifications;
 using Courses.Dal;
@@ -20,8 +21,17 @@ namespace Courses.Bll.Services;
 /// одразу після SaveChangesAsync видаляє пов'язані ключі: картку курсу, сторінки списку (через ключ-версію)
 /// і довідник категорій, якщо змінилася кількість курсів у категоріях. REST-контролер і gRPC-сервіс
 /// викликають ці самі методи, тож кеш працює для обох протоколів без дублювання.
+///
+/// Лаб. 08: зміна ціни, назви й публікації — бізнес-факти, які потрібні іншим сервісам (локальна копія
+/// довідника в Замовленнях, courseTitle у Відгуках). Порядок: 1) SaveChangesAsync, 2) інвалідація кешу,
+/// 3) публікація події. Якщо збереження не вдалося, виняток вилітає на кроці 1 і подія не публікується.
 /// </summary>
-public class CourseService(IUnitOfWork uow, IMapper mapper, ITwoLevelCache cache, ILogger<CourseService> logger) : ICourseService
+public class CourseService(
+    IUnitOfWork uow,
+    IMapper mapper,
+    ITwoLevelCache cache,
+    ICourseEventPublisher events,
+    ILogger<CourseService> logger) : ICourseService
 {
     public async Task<PagedResult<CourseDto>> GetListAsync(CourseQuery query, CancellationToken ct = default)
     {
@@ -126,10 +136,33 @@ public class CourseService(IUnitOfWork uow, IMapper mapper, ITwoLevelCache cache
 
         var oldPrice = course.Price;
         course.ChangePrice(input.Price);
-        await uow.SaveChangesAsync(ct);
+        await uow.SaveChangesAsync(ct);                                                     // 1) зміни збережено
         await InvalidateAsync("CoursePriceChanged", id, lists: true, categories: false, ct);
 
         logger.LogInformation("Course {CourseId} price changed from {OldPrice} to {NewPrice}", id, oldPrice, course.Price);
+
+        if (oldPrice != course.Price)
+            await events.PriceChangedAsync(Snapshot(course), oldPrice, ct);               // 2) лише тоді — подія
+    }
+
+    public async Task RenameAsync(long id, ChangeTitleDto input, CancellationToken ct = default)
+    {
+        using var activity = CoursesTelemetry.Source.StartActivity("RenameCourse");
+        activity?.SetTag("course.id", id);
+
+        var course = await uow.Courses.GetByIdAsync(id, ct)
+                     ?? throw new EntityNotFoundException(nameof(Course), id);
+
+        var oldTitle = course.Title;
+        course.Rename(input.Title);                     // правила назви перевіряє сама сутність
+        await uow.SaveChangesAsync(ct);
+        // Назва є і в картці, і в рядках списків, і в довіднику категорій (курси категорії)
+        await InvalidateAsync("CourseRenamed", id, lists: true, categories: true, ct);
+
+        logger.LogInformation("Course {CourseId} renamed from '{OldTitle}' to '{NewTitle}'", id, oldTitle, course.Title);
+
+        if (!string.Equals(oldTitle, course.Title, StringComparison.Ordinal))
+            await events.RenamedAsync(Snapshot(course), oldTitle, ct);
     }
 
     public async Task PublishAsync(long id, CancellationToken ct = default)
@@ -146,6 +179,7 @@ public class CourseService(IUnitOfWork uow, IMapper mapper, ITwoLevelCache cache
         await InvalidateAsync("CoursePublished", id, lists: true, categories: false, ct);
 
         logger.LogInformation("Course {CourseId} published, status {Status}", id, "Published");
+        await events.PublicationChangedAsync(Snapshot(course), ct);
     }
 
     public async Task UnpublishAsync(long id, CancellationToken ct = default)
@@ -158,6 +192,7 @@ public class CourseService(IUnitOfWork uow, IMapper mapper, ITwoLevelCache cache
         await InvalidateAsync("CourseUnpublished", id, lists: true, categories: false, ct);
 
         logger.LogInformation("Course {CourseId} unpublished", id);
+        await events.PublicationChangedAsync(Snapshot(course), ct);
     }
 
     public async Task<LessonDto> AddLessonAsync(long courseId, CreateLessonDto input, CancellationToken ct = default)
@@ -200,6 +235,8 @@ public class CourseService(IUnitOfWork uow, IMapper mapper, ITwoLevelCache cache
 
         logger.LogInformation("Course {CourseId} deleted", id);
     }
+
+    private static CourseSnapshot Snapshot(Course course) => new(course.Id, course.Title, course.Price, course.IsPublished);
 
     /// <summary>
     /// Інвалідація одразу після SaveChangesAsync і до відповіді клієнту: картка курсу, за потреби —

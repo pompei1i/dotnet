@@ -1,5 +1,6 @@
 using AutoMapper;
 using Courses.Bll.Dtos;
+using Courses.Bll.Events;
 using Courses.Bll.Mapping;
 using Courses.Bll.Services;
 using Courses.Dal;
@@ -18,6 +19,7 @@ public class CourseServiceTests
     private readonly ICourseRepository _courses = Substitute.For<ICourseRepository>();
     private readonly ICategoryRepository _categories = Substitute.For<ICategoryRepository>();
     private readonly IInstructorRepository _instructors = Substitute.For<IInstructorRepository>();
+    private readonly ICourseEventPublisher _events = Substitute.For<ICourseEventPublisher>();
     private readonly CourseService _service;
 
     internal static IMapper CreateMapper()
@@ -38,7 +40,7 @@ public class CourseServiceTests
         _categories.GetByIdsAsync(Arg.Any<IReadOnlyCollection<int>>(), Arg.Any<CancellationToken>())
             .Returns([TestData.Category(1), TestData.Category(3, "Бази даних")]);
 
-        _service = new CourseService(_uow, CreateMapper(), TestCache.Create().Cache, NullLogger<CourseService>.Instance);
+        _service = new CourseService(_uow, CreateMapper(), TestCache.Create().Cache, _events, NullLogger<CourseService>.Instance);
     }
 
     private static CreateCourseDto NewCourse() => new()

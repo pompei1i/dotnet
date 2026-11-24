@@ -14,6 +14,9 @@ public interface IUnitOfWork : IAsyncDisposable
     ICourseRepository Courses { get; }
     IOrderStatusHistoryRepository StatusHistory { get; }
 
+    /// <summary>Оброблені інтеграційні події — для ідемпотентних споживачів (Лаб. 08).</summary>
+    IProcessedEventRepository ProcessedEvents { get; }
+
     Task BeginTransactionAsync(
         IsolationLevel level = IsolationLevel.ReadCommitted, CancellationToken ct = default);
 

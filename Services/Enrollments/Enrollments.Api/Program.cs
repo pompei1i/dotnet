@@ -1,6 +1,10 @@
 using Enrollments.Api.Controllers;
 using Enrollments.Api.Grpc;
 using Enrollments.Api.HealthChecks;
+using Enrollments.Api.IntegrationEvents;
+using Enrollments.Api.IntegrationEvents.Events;
+using Enrollments.Api.IntegrationEvents.Handlers;
+using Platform.EventBus;
 using Enrollments.Api.Metrics;
 using Platform.ServiceDefaults.Grpc;
 using Enrollments.Bll.Mapping;
@@ -25,6 +29,17 @@ builder.AddEnrollmentsHealthChecks(connectionString);
 // Клас бізнес-метрик — Singleton на весь час роботи; знімок для gauge orders.by_status — фоновий сервіс
 builder.Services.AddSingleton<OrderMetrics>();
 builder.Services.AddHostedService<OrderStatusSnapshotService>();
+
+// ---------- Лаб. 08: споживач подій Каталогу ----------
+// Черга enrollments.catalog-sync отримує всі події курсу (binding course.*) і оновлює локальну копію
+// довідника dbo.Courses; DLQ — enrollments.catalog-sync.dlq. Consumer — BackgroundService з ручним ack.
+builder.AddEventBus();
+builder.Services.AddScoped<CatalogCopyUpdater>();
+builder.AddEventConsumer(CatalogCopyUpdater.Consumer, Topology.CatalogEvents)
+    .Bind("course.*")
+    .Handle<CoursePriceChangedIntegrationEvent, CoursePriceChangedHandler>()
+    .Handle<CourseRenamedIntegrationEvent, CourseRenamedHandler>()
+    .Handle<CoursePublicationChangedIntegrationEvent, CoursePublicationChangedHandler>();
 
 // DAL: Unit of Work — Scoped, тобто один екземпляр і одне з'єднання на HTTP-запит
 builder.Services.AddScoped<IUnitOfWork>(_ => new UnitOfWork(connectionString));

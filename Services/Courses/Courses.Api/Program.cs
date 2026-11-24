@@ -2,6 +2,9 @@ using StackExchange.Redis;
 using Courses.Api.Controllers;
 using Courses.Api.Grpc;
 using Courses.Api.HealthChecks;
+using Courses.Api.IntegrationEvents;
+using Courses.Bll.Events;
+using Platform.EventBus;
 using Courses.Api.Metrics;
 using Courses.Bll.Caching;
 using Courses.Bll.Mapping;
@@ -80,6 +83,13 @@ builder.Services.AddGrpc(options =>
     options.Interceptors.Add<GrpcLoggingInterceptor>();
     options.EnableDetailedErrors = builder.Environment.IsDevelopment();
 });
+
+// ---------- Лаб. 08: публікація подій Каталогу ----------
+// AddRabbitMQClient("messaging") з Aspire.RabbitMQ.Client: IConnection (singleton) і health check брокера;
+// IEventPublisher — persistent-публікація в JSON. CourseService публікує через ICourseEventPublisher
+// після SaveChangesAsync (exchange catalog-events, routing keys course.*)
+builder.AddEventBus();
+builder.Services.AddScoped<ICourseEventPublisher, CourseEventPublisher>();
 
 // BLL: сервіси
 builder.Services.AddScoped<ICourseService, CourseService>();

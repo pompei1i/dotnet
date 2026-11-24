@@ -21,6 +21,35 @@ public sealed class CourseRepository : BaseDapperRepository<Course>, ICourseRepo
             softDelete: true)
     { }
 
+    public async Task<CatalogSyncResult> ApplyCatalogSnapshotAsync(
+        long courseId, string title, decimal price, bool isAvailable, DateTime occurredAt, CancellationToken ct = default)
+    {
+        // Одна команда: UPDATE з перевіркою часу, а якщо рядка немає — INSERT. UPDLOCK/HOLDLOCK на перевірці
+        // існування не дає двом паралельним подіям про новий курс обидві вставити рядок
+        const string sql = """
+            UPDATE dbo.Courses
+            SET Title = @Title, Price = @Price, IsAvailable = @IsAvailable,
+                SyncedAt = @OccurredAt, UpdatedAt = SYSUTCDATETIME(), UpdatedBy = N'catalog-sync'
+            WHERE Id = @Id AND SyncedAt < @OccurredAt;
+
+            IF @@ROWCOUNT > 0
+                SELECT 1;
+            ELSE IF NOT EXISTS (SELECT 1 FROM dbo.Courses WITH (UPDLOCK, HOLDLOCK) WHERE Id = @Id)
+            BEGIN
+                INSERT INTO dbo.Courses (Id, Title, Price, IsAvailable, SyncedAt, CreatedBy)
+                VALUES (@Id, @Title, @Price, @IsAvailable, @OccurredAt, N'catalog-sync');
+                SELECT 2;
+            END
+            ELSE
+                SELECT 0;
+            """;
+
+        await EnsureOpenAsync(ct);
+        var result = await Connection.ExecuteScalarAsync<int>(Command(sql,
+            new { Id = courseId, Title = title, Price = price, IsAvailable = isAvailable, OccurredAt = occurredAt }, ct));
+        return (CatalogSyncResult)result;
+    }
+
     public async Task<PagedResult<Course>> GetAvailableAsync(
         string? search, int page, int pageSize, CancellationToken ct = default)
     {

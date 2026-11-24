@@ -5,7 +5,10 @@ using Platform.ServiceDefaults.Grpc;
 using Reviews.WebApi;
 using MediatR;
 using Reviews.WebApi.Grpc;
+using Platform.EventBus;
 using Reviews.WebApi.HealthChecks;
+using Reviews.WebApi.IntegrationEvents.Events;
+using Reviews.WebApi.IntegrationEvents.Handlers;
 using Reviews.WebApi.Metrics;
 using Serilog;
 
@@ -61,6 +64,14 @@ builder.Services
 // ---------- Лаб. 07: health checks і бізнес-метрики ----------
 // reviews-db (MongoDB ping), redis-cache (Degraded) і gRPC Health Checking Protocol — HealthChecks/
 builder.AddReviewsHealthChecks();
+
+// ---------- Лаб. 08: споживач подій Каталогу ----------
+// Черга reviews.catalog-sync з binding course.renamed: нова назва курсу -> courseTitle у відгуках і
+// обговореннях; DLQ — reviews.catalog-sync.dlq
+builder.AddEventBus();
+builder.AddEventConsumer(CourseRenamedHandler.Consumer, Topology.CatalogEvents)
+    .Bind("course.renamed")
+    .Handle<CourseRenamedIntegrationEvent, CourseRenamedHandler>();
 
 // Клас метрик — Singleton; MetricsBehavior додається після behaviors Application, тобто найближче до обробника
 builder.Services.AddSingleton<ReviewMetrics>();

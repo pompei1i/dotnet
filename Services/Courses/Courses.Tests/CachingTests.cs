@@ -113,7 +113,7 @@ public class CachingTests
         var course = TestData.Course();
         courses.GetWithDetailsAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(course);
         courses.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(course);
-        var service = new CourseService(uow, CourseServiceTests.CreateMapper(), TestCache.Create().Cache, NullLogger<CourseService>.Instance);
+        var service = new CourseService(uow, CourseServiceTests.CreateMapper(), TestCache.Create().Cache, Substitute.For<Courses.Bll.Events.ICourseEventPublisher>(), NullLogger<CourseService>.Instance);
 
         var before = await service.GetByIdAsync(course.Id);
         await service.GetByIdAsync(course.Id);                       // з кешу: до бази вдруге не звертається

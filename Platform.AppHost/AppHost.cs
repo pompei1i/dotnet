@@ -16,7 +16,7 @@ var sql = builder.AddSqlServer("sql", sqlPassword)
 // Aspire передає його змінною ConnectionStrings__EnrollmentsDb — код сервісу не змінюється.
 // Базу Проєкту №1 створюють скрипти Лаб. 01: вони ідемпотентні, тож повторні запуски безпечні.
 var enrollmentsDb = sql.AddDatabase("EnrollmentsDb")
-    .WithCreationScript(ReadDatabaseScripts("schema.sql", "procedures.sql", "seed.sql"));
+    .WithCreationScript(ReadDatabaseScripts("schema.sql", "procedures.sql", "seed.sql") + ReadMigrations());
 
 // Проєкт №2 — порожня база; схему й дані при старті застосовує сам Courses.Api (міграції EF Core + сідінг)
 var coursesDb = sql.AddDatabase("CoursesDb");
@@ -37,6 +37,15 @@ var feedbackDb = mongo.AddDatabase("FeedbackDb", databaseName: "feedback_db");
 var redis = builder.AddRedis("redis")
     .WithDataVolume();
 
+// ---------- Брокер повідомлень (Лаб. 08) ----------
+
+// RabbitMQ для подій між сервісами. Том зберігає durable-черги й persistent-повідомлення між перезапусками;
+// Management UI — http://localhost:15672 (користувач guest, пароль — параметр messaging-password у Dashboard).
+// Облікові дані генерує Aspire, сервіси отримують ConnectionStrings:messaging через WithReference.
+var messaging = builder.AddRabbitMQ("messaging")
+    .WithDataVolume()
+    .WithManagementPlugin(port: 15672);
+
 // ---------- Мікросервіси (Лаб. 02–04) ----------
 // Ім'я ресурсу (enrollments-api...) — логічне ім'я для service discovery: Gateway й Aggregator
 // звертаються на http://enrollments-api, а не на localhost:порт. Порти Aspire призначає сам.
@@ -50,9 +59,12 @@ var redis = builder.AddRedis("redis")
 // створює однойменні endpoint-и й призначає їм порти. Aggregator звертається до gRPC за адресою
 // http://_grpc.courses-api — service discovery підставляє саме endpoint "grpc".
 
+// Замовлення споживають події Каталогу: локальна копія довідника курсів (черга enrollments.catalog-sync)
 var enrollments = builder.AddProject<Projects.Enrollments_Api>("enrollments-api")
     .WithReference(enrollmentsDb)
     .WaitFor(enrollmentsDb)
+    .WithReference(messaging)
+    .WaitFor(messaging)
     .WithHttpHealthCheck("/health/ready");
 
 // Каталог курсів — read-heavy довідник: кеш L1 (пам'ять) + L2 (Redis)
@@ -61,6 +73,8 @@ var courses = builder.AddProject<Projects.Courses_Api>("courses-api")
     .WaitFor(coursesDb)
     .WithReference(redis)
     .WaitFor(redis)
+    .WithReference(messaging)   // публікує події про зміну курсу (exchange catalog-events)
+    .WaitFor(messaging)
     .WithHttpHealthCheck("/health/ready");
 
 // Рейтинг і стрічка відгуків курсу — читаються з кожною карткою замовлення, змінюються рідко
@@ -69,6 +83,8 @@ var reviews = builder.AddProject<Projects.Reviews_WebApi>("reviews-api")
     .WaitFor(feedbackDb)
     .WithReference(redis)
     .WaitFor(redis)
+    .WithReference(messaging)   // споживає course.renamed: courseTitle у відгуках і обговореннях
+    .WaitFor(messaging)
     .WithHttpHealthCheck("/health/ready");
 
 // ---------- Нові компоненти платформи (Лаб. 05) ----------
@@ -109,4 +125,15 @@ string ReadDatabaseScripts(params string[] fileNames)
     return string.Join(
         $"{Environment.NewLine}GO{Environment.NewLine}",
         fileNames.Select(fileName => File.ReadAllText(Path.Combine(scriptsDirectory, fileName))));
+}
+
+// Міграції EnrollmentsDb після Лаб. 01 (Лаб. 08: таблиця ProcessedEvents) — ідемпотентні SQL-скрипти
+// з Enrollments.Dal/Migrations у порядку імен; виконуються після схеми, процедур і сідінгу
+string ReadMigrations()
+{
+    var directory = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "Services", "Enrollments", "Enrollments.Dal", "Migrations"));
+
+    return string.Concat(Directory.GetFiles(directory, "*.sql")
+        .Order(StringComparer.Ordinal)
+        .Select(file => $"{Environment.NewLine}GO{Environment.NewLine}{File.ReadAllText(file)}"));
 }

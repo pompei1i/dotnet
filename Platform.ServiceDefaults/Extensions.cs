@@ -50,6 +50,12 @@ public static class Extensions
     public const string PollyMeterName = "Polly";
 
     /// <summary>
+    /// Події через RabbitMQ (Лаб. 08, Platform.EventBus): ActivitySource spans publish / process з контекстом,
+    /// переданим у заголовках повідомлення, і Meter з метриками обробки та глибиною черг.
+    /// </summary>
+    public const string MessagingSource = "Platform.Messaging";
+
+    /// <summary>
     /// Бізнес-метрики сервісів (Лаб. 07): Meter називається так само, як сервіс (ім'я збірки API),
     /// клас метрик лежить у &lt;Сервіс&gt;.Api/Metrics/.
     /// </summary>
@@ -172,6 +178,7 @@ public static class Extensions
                     // Лаб. 07: бізнес-метрики сервісів і події resilience (OnRetry, OnCircuitOpened...)
                     .AddMeter(BusinessMeters)
                     .AddMeter(PollyMeterName)
+                    .AddMeter(MessagingSource)                    // обробка подій і глибина черг (Лаб. 08)
                     // Кошики гістограм тривалості операцій у мілісекундах (за замовчуванням вони під секунди)
                     .AddView(OperationDurationPattern, new ExplicitBucketHistogramConfiguration { Boundaries = OperationDurationBuckets });
             })
@@ -185,6 +192,7 @@ public static class Extensions
                 tracing.AddSource(applicationName, sourcePrefix)  // власні spans бізнес-операцій
                     .AddSource(CacheMeterPattern)                 // spans операцій кешу (Лаб. 06)
                     .AddSource(GrpcClientActivitySource)          // клієнтський span gRPC-виклику (батько HTTP POST)
+                    .AddSource(MessagingSource)                   // publish -> process через RabbitMQ (Лаб. 08)
                     .AddSource(MongoDbActivitySource)             // команди MongoDB (сервіс відгуків)
                     .AddAspNetCoreInstrumentation(options =>
                     {

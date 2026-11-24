@@ -9,6 +9,7 @@
 - **Лабораторна робота №5** — мікросервісна платформа на .NET Aspire: спільні `ServiceDefaults` (Serilog, OpenTelemetry, CorrelationId), API Gateway на YARP, Aggregator із паралельними викликами й частковими відмовами, трасування й логи всіх сервісів в Aspire Dashboard. Див. [Платформа](#платформа-servicedefaults-api-gateway-aggregator-лаб-05).
 - **Лабораторна робота №6** — gRPC і кешування: Redis в AppHost, дворівневий кеш L1 (`IMemoryCache`) + L2 (Redis) у каталозі курсів і `HybridCache` у відгуках з інвалідацією після запису, gRPC-контракти й сервіси в усіх трьох мікросервісах, Aggregator на паралельних gRPC-викликах із кешем агрегованих відповідей, interceptor і метрики кешу в Dashboard. Див. [gRPC і кешування](#grpc-і-кешування-лаб-06).
 - **Лабораторна робота №7** — резильєнтність і спостережуваність: Standard Resilience Handler без нашарування, різні політики retry / circuit breaker / таймаутів для критичних і некритичних сервісів, retry за gRPC-статусами, graceful degradation Redis, бізнес-метрики (лічильники, гістограми, gauge), health checks SQL Server, MongoDB, Redis (Degraded) і gRPC-залежностей, розділені liveness і readiness. Див. [Resilience, метрики, health checks](#resilience-бізнес-метрики-та-health-checks-лаб-07).
+- **Лабораторна робота №8** — подієва архітектура на RabbitMQ: Каталог публікує інтеграційні події після збереження змін, Замовлення й Відгуки оновлюють свої копії даних (політика дублювання Лаб. 01); декларативна топологія з DLX/DLQ, ручне підтвердження, повтори з x-retry-count, ідемпотентні обробники (ProcessedEvents), трасування через брокер. Див. [Події через брокер](#події-через-брокер-повідомлень-лаб-08).
 
 ## Предметна область
 
@@ -1465,6 +1466,189 @@ AppHost опитує `WithHttpHealthCheck("/health/ready")`. Тому Dashboard 
 
 ![Resources](docs/screenshots/lab07-resources.png)
 
+## Події через брокер повідомлень (Лаб. 08)
+
+Політика дублювання з Лаб. 01 запланувала, що частина копій даних оновлюється «подіями з Каталогу». Тепер цей механізм працює:
+- **Каталог** (`courses-api`) після зміни курсу публікує інтеграційну подію в RabbitMQ;
+- **Замовлення** (`enrollments-api`) оновлюють локальний довідник `dbo.Courses`;
+- **Відгуки** (`reviews-api`) оновлюють `courseTitle` у всіх відгуках і обговореннях курсу.
+
+Сервіси один одного не викликають, узгодженість досягається через кілька мілісекунд (eventual consistency).
+
+```mermaid
+flowchart LR
+    client(["PUT /api/courses/1/title"]) --> crs["courses-api<br/>SaveChanges → Publish"]
+    crs -- "course.renamed<br/>persistent JSON + traceparent" --> ex{{"catalog-events<br/>topic"}}
+    ex -- "course.*" --> q1[["enrollments.catalog-sync"]]
+    ex -- "course.renamed" --> q2[["reviews.catalog-sync"]]
+    q1 --> enr["enrollments-api<br/>ProcessedEvents + dbo.Courses<br/>(одна транзакція)"]
+    q2 --> rev["reviews-api<br/>processed_events, courseTitle"]
+    q1 -. "nack / 3 повтори вичерпано" .-> dlx{{"catalog-events.dlx<br/>direct"}}
+    q2 -.-> dlx
+    dlx -- "enrollments.catalog-sync" --> d1[["enrollments.catalog-sync.dlq"]]
+    dlx -- "reviews.catalog-sync" --> d2[["reviews.catalog-sync.dlq"]]
+```
+
+### RabbitMQ в AppHost і підключення
+
+```csharp
+var messaging = builder.AddRabbitMQ("messaging")
+    .WithDataVolume()                  // durable-черги й persistent-повідомлення переживають перезапуск
+    .WithManagementPlugin(port: 15672);
+courses.WithReference(messaging).WaitFor(messaging);       // публікує
+enrollments.WithReference(messaging).WaitFor(messaging);   // споживає
+reviews.WithReference(messaging).WaitFor(messaging);       // споживає
+```
+
+Management UI: `http://localhost:15672`, користувач `guest`. Пароль генерує Aspire: параметр `messaging-password` у Dashboard (Parameters) або в user-secrets AppHost.
+
+Спільна інфраструктура — новий проєкт **`Platform.EventBus`** (`RabbitMQ.Client` 7.2 — повністю асинхронний `IChannel`, `Aspire.RabbitMQ.Client`). У Program.cs сервісу:
+
+```csharp
+builder.AddEventBus();   // AddRabbitMQClient("messaging"): IConnection (singleton) + health check брокера
+builder.AddEventConsumer("enrollments.catalog-sync", Topology.CatalogEvents)
+    .Bind("course.*")
+    .Handle<CoursePriceChangedIntegrationEvent, CoursePriceChangedHandler>()
+    .Handle<CourseRenamedIntegrationEvent, CourseRenamedHandler>()
+    .Handle<CoursePublicationChangedIntegrationEvent, CoursePublicationChangedHandler>();
+```
+
+Вбудоване трасування Aspire-інтеграції вимкнено (`DisableTracing`): контекст передає власний `TracePropagation`, і заголовок `traceparent` не пишеться двічі. Без рядка підключення (тести, запуск без Aspire) `AddEventBus` реєструє `NoOpEventPublisher`, який лише логує неопубліковану подію, а споживачі не стартують.
+
+### Топологія
+
+`Platform.EventBus/Topology.cs` оголошує топологію в коді під час старту. Повторне оголошення безпечне, а змінювати параметри черги вручну в Management UI не можна, бо наступний старт отримає `PRECONDITION_FAILED`.
+
+| Об'єкт | Тип | Призначення |
+|---|---|---|
+| `catalog-events` | topic, durable | події Каталогу; routing key `course.{подія}` |
+| `enrollments.catalog-sync` | durable, `x-dead-letter-exchange`, `x-dead-letter-routing-key` | черга Замовлень, binding `course.*` (усі події курсу) |
+| `reviews.catalog-sync` | те саме | черга Відгуків, binding `course.renamed` (Відгукам потрібна лише назва) |
+| `catalog-events.dlx` | direct, durable | dead letter exchange |
+| `*.dlq` | durable | DLQ кожної черги, прив'язана до DLX ключем з іменем черги |
+
+DLX — direct, і кожна черга відправляє «мертві» повідомлення з власним routing key. Тому відхилене повідомлення Замовлень потрапляє лише в DLQ Замовлень. Зі спільним fanout DLX, як у прикладі методички, воно потрапляло б у DLQ усіх сервісів.
+
+### Події та публікація
+
+`IntegrationEvent` (`Platform.EventBus`) — незмінний `record` з `EventId` (Guid, для ідемпотентності), `OccurredAt` (UTC, для порядку), `CorrelationId` (Лаб. 05) і `SchemaVersion`. Події Каталогу (`Courses.Api/IntegrationEvents/Events`) названо в минулому часі. Кожна несе **повний знімок** курсу, тож споживач не звертається до Каталогу:
+
+| Подія | Routing key | Поля |
+|---|---|---|
+| `CoursePriceChangedIntegrationEvent` | `course.price_changed` | `CourseId`, `Title`, `OldPrice`, `NewPrice`, `IsPublished` |
+| `CourseRenamedIntegrationEvent` | `course.renamed` | `CourseId`, `OldTitle`, `NewTitle`, `Price`, `IsPublished` |
+| `CoursePublicationChangedIntegrationEvent` | `course.published` / `course.unpublished` | `CourseId`, `Title`, `Price`, `IsPublished` |
+
+Як у Microsoft eShop, кожен сервіс має **власну копію** класу події лише з потрібними полями. Контракт між сервісами — ім'я типу (`BasicProperties.Type`) і JSON, а не спільна збірка. Нові поля додаються, наявні не перейменовуються (`SchemaVersion`); невідомі поля споживач ігнорує.
+
+`RabbitMqEventPublisher` формує повідомлення так:
+- серіалізує подію в JSON (camelCase, `EventBusJson`);
+- задає `Persistent = true`, `ContentType`, `MessageId = EventId`, `Type = ім'я класу`, `Timestamp = OccurredAt`;
+- додає заголовки `x-correlation-id`, `x-schema-version` і `traceparent`;
+- канал — з **publisher confirms**: `PublishAsync` повертається, коли брокер записав повідомлення;
+- логує кожну публікацію з `EventType`, `EventId`, `CorrelationId`.
+
+**Порядок у бізнес-операції** (`CourseService`): `SaveChangesAsync` → інвалідація кешу → `ICourseEventPublisher`. Якщо збереження не вдалося, виняток вилітає раніше, і подія не публікується (тест `Failed_save_publishes_nothing`). BLL знає лише абстракцію `ICourseEventPublisher`, а реалізація на RabbitMQ лежить у `Courses.Api/IntegrationEvents`. Для перейменування додано `PUT /api/courses/{id}/title`.
+
+Межа надійності: між збереженням у БД і публікацією застосунок може впасти, і тоді зміна збережеться, а подія загубиться. Збій публікації логується як `Error` з усіма даними події (для ручної повторної публікації), а клієнт отримує успіх, бо його зміна збережена. Гарантію доставки дав би **Transactional Outbox**: подія записується в таблицю тієї самої БД в одній транзакції зі змінами, а фоновий процес публікує її (як `IntegrationEventLogEF` в eShop). У цій роботі outbox не реалізовано.
+
+### Споживачі, ack і помилки
+
+`RabbitMqEventConsumer` (`Platform.EventBus`) — це `BackgroundService`:
+- один канал на чергу, декларація топології, `BasicQos(prefetch: 10)`;
+- `AsyncEventingBasicConsumer` з `BasicConsumeAsync(autoAck: false)`;
+- обробник шукається за `BasicProperties.Type` і створюється в DI-scope повідомлення;
+- брокер недоступний на старті — повторне підключення кожні 5 с;
+- під час зупинки непідтверджене повідомлення не підтверджується, і RabbitMQ поверне його в чергу.
+
+| Ситуація | Рішення | Лог |
+|---|---|---|
+| успіх | `BasicAckAsync` | `Information`: Handled … in N ms |
+| некоректний JSON, порожній `EventId`, `PermanentEventException` (зокрема помилка валідації команди) | `BasicNackAsync(requeue: false)` → DLX → DLQ, **без повторів** | `Error` з причиною |
+| тимчасовий збій (БД недоступна, таймаут) | повтор: копія публікується **в свою чергу** через default exchange з `x-retry-count + 1`, оригінал — `ack`; паузи 1 → 2 → 4 с | `Warning`: retry N/3 |
+| вичерпано 3 повтори | `BasicNackAsync(requeue: false)` → DLQ | `Error`: failed after 4 attempts |
+| тип події без обробника | `ack`, подію проігноровано | `Warning` |
+
+Пояснення до таблиці:
+- **Чому не requeue.** Заголовки повернутого в чергу повідомлення змінити не можна, тож спроб не порахувати. Тому лічильник спроб — `x-retry-count` у повторно опублікованій копії.
+- **Чому повтор у свою чергу.** Повтор у topic exchange отримали б і черги інших сервісів.
+- **Порядок повтору.** Спершу публікується копія, потім `ack` оригіналу: якщо процес впаде між ними, вийде дублікат, а не втрата.
+- **Що є в логах.** Усі логи обробки мають `CorrelationId`, `EventId`, `EventType`, `Queue`, `RetryCount` (scope).
+- **Метрики `Platform.Messaging`.** `messaging.messages.processed` (за `outcome`), `messaging.process.duration` і gauge `messaging.queue.depth` для черг і DLQ: асинхронні збої «тихі», клієнта, який побачив би помилку, немає.
+
+### Ідемпотентність і реплікація копій
+
+RabbitMQ доставляє «щонайменше один раз», тому кожен обробник ідемпотентний за `EventId`.
+
+**Замовлення (SQL Server).** Міграція `Services/Enrollments/Enrollments.Dal/Migrations/001_ProcessedEvents.sql` створює таблицю `dbo.ProcessedEvents (EventId PK, EventType, Consumer, OccurredAt, ProcessedAt)`. AppHost виконує цю міграцію після скриптів Лаб. 01. `CatalogCopyUpdater` в одній транзакції Unit of Work:
+1. `INSERT` EventId. Порушення PRIMARY KEY (2627) означає дублікат: rollback і пропуск.
+2. Оновлює `dbo.Courses` (`Title`, `Price`, `IsAvailable`) **лише якщо `OccurredAt` новіший за `SyncedAt`**. Подія, що прийшла не по порядку, не перезапише свіжі дані. Курсу, якого ще немає, — додає.
+3. `COMMIT`: EventId і бізнес-зміна фіксуються разом.
+
+`OrderItems.UnitPrice` і `CourseTitle` — знімок на момент покупки за політикою Лаб. 01, і вони **не змінюються**.
+
+**Відгуки (MongoDB).** Стенд MongoDB — один сервер без replica set, транзакцій на кілька документів немає. Тому кожен крок `SyncCourseTitleCommandHandler` безпечно повторюється:
+1. `_id` події вже є в `processed_events` — дублікат, пропуск.
+2. Read model `catalog_courses { _id: courseId, title, appliedAt }` оновлюється upsert-ом з умовою `appliedAt ≤ OccurredAt`. Новіший документ дає duplicate key, і така подія вважається застарілою.
+3. `UpdateMany` `courseTitle` у `reviews` і `discussions`.
+4. Інвалідація кешу курсу (Лаб. 06) і позначка `processed_events`.
+
+Якщо процес впаде між кроками, повторна доставка дасть той самий стан.
+
+Інтеграційний обробник (`Reviews.WebApi/IntegrationEvents/Handlers`) лише перетворює подію на MediatR-команду. Тому обробка проходить увесь pipeline: трасування, логування, валідацію, метрики. Шар Application не знає ні про RabbitMQ, ні про MongoDB (`ICatalogSyncStore`).
+
+Оновлено політику дублювання (Лаб. 01):
+
+| Копія | Подія | Хто оновлює |
+|---|---|---|
+| `dbo.Courses.Title`, `Price`, `IsAvailable` (EnrollmentsDb) | `course.price_changed`, `course.renamed`, `course.published`, `course.unpublished` | `enrollments.catalog-sync` → `CatalogCopyUpdater` |
+| `reviews.courseTitle`, `discussions.courseTitle` (feedback_db) | `course.renamed` | `reviews.catalog-sync` → `SyncCourseTitleCommandHandler` |
+
+### Розподілене трасування через брокер
+
+`TracePropagation` (`Platform.EventBus`, ActivitySource `Platform.Messaging` додано в ServiceDefaults):
+- **Публікація.** Span `catalog-events publish` (Producer). Його контекст пропагатор OpenTelemetry записує в заголовки повідомлення (W3C `traceparent`).
+- **Обробка.** Контекст витягується з заголовків (`byte[]`), і span `<черга> process` (Consumer) з тегами `messaging.system`, `messaging.destination.name`, `messaging.message.id`, `messaging.message.type`, `messaging.rabbitmq.destination.routing_key`, `messaging.retry.count` стає його нащадком.
+
+Так утворюється один trace: HTTP → publish → process у двох сервісах → БД.
+
+### Перевірено наживо
+
+| Сценарій | Результат |
+|---|---|
+| `PUT /api/courses/3/price` 1500 → 1650 | за мить `dbo.Courses.Price = 1650`; `OrderItems.UnitPrice` курсу 3 лишився 1500; EventId у `ProcessedEvents` |
+| `PUT /api/courses/1/title` | нова назва в `dbo.Courses` і в обох відгуках курсу; у позиціях замовлень — стара назва |
+| та сама подія двічі (Management API, однаковий EventId) | ціну змінила лише перша доставка; EventId записано один раз; у лозі `Duplicate … skipped` |
+| некоректний JSON (`course.renamed`) | одразу в обидві DLQ, `x-death.reason = rejected` |
+| enrollments-api зупинено, ціна змінена двічі, потім Start | копія лишалася 1700, після старту — 1800: події дочекалися в черзі |
+| SQL Server зупинено під час обробки | retry 1/3 → 2/3 → 3/3 (паузи 1, 2, 4 с), потім DLQ з усім бізнес-контекстом у лозі |
+
+### Знімки екрана
+
+Наскрізний trace перейменування — HTTP-запит до Каталогу → SQL UPDATE → інвалідація кешу → publish → обробка в enrollments-api (INSERT ProcessedEvents, UPDATE Courses) і reviews-api (Mongo update reviews / discussions). Праворуч — span споживача з тегами `messaging.*`:
+
+![Trace HTTP → Publish → Consume → DB](docs/screenshots/lab08-trace.png)
+
+Management UI — черги з DLX і DLQ:
+
+![RabbitMQ: черги](docs/screenshots/lab08-rabbitmq-queues.png)
+
+Exchange `catalog-events` з bindings `course.*` і `course.renamed`:
+
+![RabbitMQ: exchange і bindings](docs/screenshots/lab08-rabbitmq-exchange.png)
+
+Некоректне повідомлення в DLQ із заголовком `x-death`:
+
+![Повідомлення в DLQ](docs/screenshots/lab08-dlq-message.png)
+
+Повтори з `x-retry-count` при зупиненому SQL Server і відправка в DLQ, з бізнес-контекстом:
+
+![Логи повторів](docs/screenshots/lab08-retry-logs.png)
+
+Повторна доставка тієї самої події пропускається:
+
+![Дублікат події](docs/screenshots/lab08-duplicate-logs.png)
+
 ## Контексти та бази даних
 
 Систему поділено на три незалежні контексти (Bounded Contexts). Кожен має власну базу; кожна сутність належить рівно одному контексту.
@@ -1506,8 +1690,8 @@ AppHost опитує `WithHttpHealthCheck("/health/ready")`. Тому Dashboard 
 | Поле | Де зберігається | Джерело (власник даних) | Політика узгодженості |
 |---|---|---|---|
 | `OrderItems.CourseTitle`, `OrderItems.UnitPrice` | `EnrollmentsDb` | `Courses.Title`, `Courses.Price` (`CoursesDb`) | **знімок** на момент оформлення — не оновлюється |
-| `Courses.Title`, `Courses.Price`, `Courses.IsAvailable` (локальна копія довідника) | `EnrollmentsDb` | `Courses.Title`, `Price`, `IsPublished` (`CoursesDb`) | оновлюється подіями `CoursePublished`, `CourseUpdated`, `CourseUnpublished` |
-| `reviews.courseTitle`, `discussions.courseTitle`, `course_ratings.courseTitle` | `feedback_db` | `Courses.Title` (`CoursesDb`) | оновлюється подією `CourseUpdated` |
+| `Courses.Title`, `Courses.Price`, `Courses.IsAvailable` (локальна копія довідника) | `EnrollmentsDb` | `Courses.Title`, `Price`, `IsPublished` (`CoursesDb`) | оновлюється подіями `CoursePublished`, `CourseUpdated`, `CourseUnpublished` (реалізовано в Лаб. 08: `course.published`, `course.price_changed`, `course.renamed`, `course.unpublished`) |
+| `reviews.courseTitle`, `discussions.courseTitle`, `course_ratings.courseTitle` | `feedback_db` | `Courses.Title` (`CoursesDb`) | оновлюється подією `CourseUpdated` (реалізовано в Лаб. 08: `course.renamed` для `reviews` і `discussions`) |
 | `Courses.AverageRating`, `Courses.ReviewsCount` | `CoursesDb` | `course_ratings` (`feedback_db`) | оновлюється подією `CourseRatingChanged` |
 | `reviews.author.displayName`, `author.displayName` студента в `discussions`, `messages`, `reviews.comments`, а також `lastMessage.authorName` і `recentReviews.authorName` | `feedback_db` | `Students.FullName` (`EnrollmentsDb`) | оновлюється подією `StudentRenamed` |
 | `reviews.isVerifiedPurchase` | `feedback_db` | `Orders.Status` (`EnrollmentsDb`) | оновлюється подіями `OrderAccessGranted`, `OrderRefunded` |
@@ -1648,16 +1832,17 @@ Platform.slnx              одне рішення на всю платформ�
 Platform.AppHost/          оркестрація .NET Aspire (AppHost.cs): бази, сервіси, Aggregator, Gateway
 Platform.ServiceDefaults/  Extensions.cs (Serilog, OpenTelemetry, resilience, health), CorrelationIdMiddleware, CorrelationIdHandler, Grpc/GrpcLoggingInterceptor, HealthChecks/HealthResponseWriter
 Platform.ApiGateway/       YARP: маршрути й кластери в appsettings.json, Logging/ (лог маршрутизації, метрики)
+Platform.EventBus/         RabbitMQ: IntegrationEvent, топологія з DLX/DLQ, publisher, consumer (BackgroundService), повтори, TracePropagation
 Platform.Aggregator/       Clients/ (обгортки gRPC-клієнтів), Resilience/ (політики стійкості клієнтів), HealthChecks/ (gRPC health залежностей), Caching/ (кеш агрегованих відповідей у Redis), Services/ (агрегація, часткові відмови), Models/ (композитні DTO)
 Services/
   Enrollments/             Проєкт №1 — ADO.NET + Dapper
-    Enrollments.Api/       контролери, Protos/enrollments.proto, Grpc/ (gRPC-сервіс), Metrics/, HealthChecks/, Program.cs, appsettings.json, обробник помилок
+    Enrollments.Api/       контролери, Protos/enrollments.proto, Grpc/ (gRPC-сервіс), Metrics/, HealthChecks/, IntegrationEvents/ (події, обробники), Program.cs, appsettings.json, обробник помилок
     Enrollments.Bll/       сервіси, DTO, профілі AutoMapper, бізнес-правила
-    Enrollments.Dal/       інтерфейси й реалізації репозиторіїв, Unit of Work
+    Enrollments.Dal/       інтерфейси й реалізації репозиторіїв, Unit of Work, Migrations/ (ProcessedEvents)
     Enrollments.Domain/    моделі, статуси, доменні винятки
     Enrollments.Tests/     unit-тести BLL і API-тести
   Courses/                 Проєкт №2 — EF Core
-    Courses.Api/           контролери, Protos/courses.proto, Grpc/ (gRPC-сервіс), Metrics/, HealthChecks/, Program.cs, appsettings.json, обробник помилок, Dockerfile
+    Courses.Api/           контролери, Protos/courses.proto, Grpc/ (gRPC-сервіс), Metrics/, HealthChecks/, IntegrationEvents/ (події, publisher), Program.cs, appsettings.json, обробник помилок, Dockerfile
     Courses.Bll/           сервіси, DTO, профілі AutoMapper, специфікації, валідатори, Caching/ (L1 + L2, метрики, прогрівання)
     Courses.Dal/           DbContext, Configurations/, Migrations/, репозиторії, Unit of Work, Seeding/
     Courses.Domain/        сутності з бізнес-правилами, доменні винятки
@@ -1666,7 +1851,7 @@ Services/
     Reviews.Domain/        сутності, value objects, перерахування, доменні винятки, інтерфейси репозиторіїв
     Reviews.Application/   Commands/, Queries/, Common/Behaviors/, Caching/ (HybridCache, CachingBehavior), валідатори, DTO, профілі AutoMapper
     Reviews.Infrastructure/ Persistence/ (Mongo-контекст, BSON-мапінг, репозиторії, читання), Seeding/
-    Reviews.WebApi/        контролери, Protos/reviews.proto, Grpc/ (gRPC-сервіс), Metrics/, HealthChecks/, Program.cs, обробка помилок, appsettings.{Environment}.json
+    Reviews.WebApi/        контролери, Protos/reviews.proto, Grpc/ (gRPC-сервіс), Metrics/, HealthChecks/, IntegrationEvents/ (події, обробники), Program.cs, обробка помилок, appsettings.{Environment}.json
     Reviews.Tests/         тести домену, behaviors, BSON-мапінгу, запитів, архітектури та API
 dotnet-tools.json          локальний інструмент dotnet-ef
 docs/
@@ -1816,4 +2001,4 @@ EXEC dbo.usp_ChangeOrderStatus @OrderId = 3, @NewStatus = N'AccessGranted';
 
 ## Що далі
 
-Сервіси об'єднано в платформу з єдиною точкою входу, наскрізним трасуванням і агрегацією, а внутрішні виклики переведено на gRPC із кешуванням у пам'яті та Redis. Також додано політики стійкості, бізнес-метрики й health checks. Наступна робота — Лаб. 08 (події через брокер повідомлень).
+Сервіси об'єднано в платформу з єдиною точкою входу, наскрізним трасуванням і агрегацією, а внутрішні виклики переведено на gRPC із кешуванням у пам'яті та Redis. Також додано політики стійкості, бізнес-метрики й health checks. Копії даних між сервісами оновлюються подіями через RabbitMQ (Лаб. 08).

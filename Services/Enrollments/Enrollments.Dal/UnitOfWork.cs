@@ -34,12 +34,14 @@ public sealed class UnitOfWork : IUnitOfWork
         Orders = new OrderRepository(_connection, () => _transaction);
         Courses = new CourseRepository(_connection, () => _transaction);
         StatusHistory = new OrderStatusHistoryRepository(_connection, () => _transaction);
+        ProcessedEvents = new ProcessedEventRepository(_connection, () => _transaction);
     }
 
     public IStudentRepository Students { get; }
     public IOrderRepository Orders { get; }
     public ICourseRepository Courses { get; }
     public IOrderStatusHistoryRepository StatusHistory { get; }
+    public IProcessedEventRepository ProcessedEvents { get; }
 
     public async Task BeginTransactionAsync(
         IsolationLevel level = IsolationLevel.ReadCommitted, CancellationToken ct = default)
