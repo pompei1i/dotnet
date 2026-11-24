@@ -41,7 +41,9 @@ var redis = builder.AddRedis("redis")
 // Ім'я ресурсу (enrollments-api...) — логічне ім'я для service discovery: Gateway й Aggregator
 // звертаються на http://enrollments-api, а не на localhost:порт. Порти Aspire призначає сам.
 // WithReference — передати рядок підключення / адресу; WaitFor — не стартувати, доки залежність не готова.
-// WithHttpHealthCheck — «готовий» означає, що /health відповідає (міграції, індекси вже застосовано).
+// WithHttpHealthCheck("/health/ready") (Лаб. 07) — Dashboard показує стан ресурсу (Healthy / Degraded /
+// Unhealthy) за readiness-перевірками сервісу: база, Redis (Degraded), у Aggregator — gRPC-залежності.
+// Тому WaitFor чекає, поки залежність стане ЗДОРОВОЮ (база відповідає, міграції застосовано), а не лише запуститься.
 //
 // Лаб. 06: кожен сервіс має два endpoint-и з розділу Kestrel:Endpoints свого appsettings.json —
 // "http" (REST для Gateway, HTTP/1.1) і "grpc" (лише HTTP/2 без TLS, h2c). Aspire читає цей розділ,
@@ -51,7 +53,7 @@ var redis = builder.AddRedis("redis")
 var enrollments = builder.AddProject<Projects.Enrollments_Api>("enrollments-api")
     .WithReference(enrollmentsDb)
     .WaitFor(enrollmentsDb)
-    .WithHttpHealthCheck("/health");
+    .WithHttpHealthCheck("/health/ready");
 
 // Каталог курсів — read-heavy довідник: кеш L1 (пам'ять) + L2 (Redis)
 var courses = builder.AddProject<Projects.Courses_Api>("courses-api")
@@ -59,7 +61,7 @@ var courses = builder.AddProject<Projects.Courses_Api>("courses-api")
     .WaitFor(coursesDb)
     .WithReference(redis)
     .WaitFor(redis)
-    .WithHttpHealthCheck("/health");
+    .WithHttpHealthCheck("/health/ready");
 
 // Рейтинг і стрічка відгуків курсу — читаються з кожною карткою замовлення, змінюються рідко
 var reviews = builder.AddProject<Projects.Reviews_WebApi>("reviews-api")
@@ -67,7 +69,7 @@ var reviews = builder.AddProject<Projects.Reviews_WebApi>("reviews-api")
     .WaitFor(feedbackDb)
     .WithReference(redis)
     .WaitFor(redis)
-    .WithHttpHealthCheck("/health");
+    .WithHttpHealthCheck("/health/ready");
 
 // ---------- Нові компоненти платформи (Лаб. 05) ----------
 
@@ -82,7 +84,7 @@ var aggregator = builder.AddProject<Projects.Platform_Aggregator>("aggregator")
     .WaitFor(courses)
     .WaitFor(reviews)
     .WaitFor(redis)
-    .WithHttpHealthCheck("/health");
+    .WithHttpHealthCheck("/health/ready");
 
 // Gateway — єдина точка входу з фіксованим портом 5000. Посилання на всі сервіси й Aggregator
 // потрібні YARP для маршрутизації. Порядок старту: БД -> сервіси -> Aggregator -> Gateway.
@@ -93,7 +95,7 @@ builder.AddProject<Projects.Platform_ApiGateway>("gateway")
     .WithReference(reviews)
     .WithReference(aggregator)
     .WaitFor(aggregator)
-    .WithHttpHealthCheck("/health")
+    .WithHttpHealthCheck("/health/ready")
     .WithExternalHttpEndpoints();
 
 builder.Build().Run();

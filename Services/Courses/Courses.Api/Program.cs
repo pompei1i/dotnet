@@ -1,6 +1,8 @@
 using StackExchange.Redis;
 using Courses.Api.Controllers;
 using Courses.Api.Grpc;
+using Courses.Api.HealthChecks;
+using Courses.Api.Metrics;
 using Courses.Bll.Caching;
 using Courses.Bll.Mapping;
 using Courses.Bll.Services;
@@ -45,7 +47,8 @@ builder.Services.AddMemoryCache(options =>
 // передає AppHost; інтеграція сама додає повторні з'єднання, health check і трасування команд Redis.
 // Без Aspire (dotnet run, тести) рядка немає — тоді L2 замінює MemoryDistributedCache і кеш фактично однорівневий
 if (!string.IsNullOrEmpty(builder.Configuration.GetConnectionString("redis")))
-    builder.AddRedisDistributedCache("redis", configureOptions: redis =>
+    // Вбудований health check інтеграції (Unhealthy) вимкнено: свій redis-cache зі статусом Degraded — HealthChecks/
+    builder.AddRedisDistributedCache("redis", settings => settings.DisableHealthChecks = true, redis =>
     {
         // Redis — прискорювач: якщо він недоступний, команди мають падати одразу (FailFast), а не стояти
         // в черзі до timeout (5 с за замовчуванням), інакше кожен запит чекав би секунди замість мілісекунд
@@ -62,7 +65,11 @@ builder.Services.Configure<CachingOptions>(builder.Configuration.GetSection(Cach
 builder.Services.AddSingleton<CacheMetrics>();
 builder.Services.AddSingleton<ITwoLevelCache, TwoLevelCache>();
 builder.Services.AddHostedService<CacheWarmupService>();
-builder.Services.AddHealthChecks().AddCheck<CacheHealthCheck>("cache");
+// ---------- Лаб. 07: health checks і бізнес-метрики ----------
+// courses-db (SQL Server), redis-cache (Degraded), статистика кешу і gRPC Health Checking Protocol — HealthChecks/
+builder.AddCoursesHealthChecks(connectionString);
+builder.Services.AddSingleton<CatalogMetrics>();
+builder.Services.AddHostedService<CatalogSnapshotService>();
 
 // ---------- gRPC (Лаб. 06) ----------
 
@@ -146,7 +153,8 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapControllers();
-app.MapGrpcService<CoursesGrpcService>();   // gRPC-API каталогу для Aggregator
+app.MapGrpcService<CoursesGrpcService>();
+app.MapGrpcHealthChecksService();   // grpc.health.v1.Health — для Aggregator   // gRPC-API каталогу для Aggregator
 app.MapDefaultEndpoints();   // /health і /alive
 
 app.Run();

@@ -21,6 +21,9 @@ public interface IOrderRepository : IGenericRepository<Order>
     /// <summary>Кількість незавершених замовлень студента (Submitted, AwaitingPayment, Paid).</summary>
     Task<int> CountActiveByStudentAsync(long studentId, CancellationToken ct = default);
 
+    /// <summary>Кількість не видалених замовлень у кожному статусі — один GROUP BY (для gauge-метрики, Лаб. 07).</summary>
+    Task<IReadOnlyDictionary<string, int>> CountByStatusAsync(CancellationToken ct = default);
+
     Task AddDetailsAsync(OrderDetails details, CancellationToken ct = default);
 
     Task AddItemAsync(OrderItem item, CancellationToken ct = default);

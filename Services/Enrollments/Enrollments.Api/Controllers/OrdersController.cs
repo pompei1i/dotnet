@@ -1,5 +1,6 @@
 using Enrollments.Bll.Dtos;
 using Enrollments.Bll.Services;
+using Enrollments.Api.Metrics;
 using Enrollments.Domain;
 using Microsoft.AspNetCore.Mvc;
 
@@ -8,17 +9,19 @@ namespace Enrollments.Api.Controllers;
 /// <summary>
 /// Тонкий контролер: приймає запит, викликає сервіс і повертає HTTP-статус.
 /// Бізнес-правил і SQL тут немає; винятки перетворює DomainExceptionHandler.
+/// Лаб. 07: кожна операція записує тривалість (успіх і відмова) в orders.operation.duration,
+/// а успішна — ще й бізнес-лічильник (orders.created, orders.status_changed...).
 /// </summary>
 [ApiController]
 [Route("api/orders")]
-public class OrdersController(IOrderService orders) : ControllerBase
+public class OrdersController(IOrderService orders, OrderMetrics metrics) : ControllerBase
 {
     /// <summary>Замовлення з реквізитами та позиціями.</summary>
     [HttpGet("{id:long}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<OrderDto>> GetById(long id, CancellationToken ct)
-        => Ok(await orders.GetByIdAsync(id, ct));
+        => Ok(await metrics.MeasureAsync("get", () => orders.GetByIdAsync(id, ct)));
 
     /// <summary>Історія зміни статусів замовлення.</summary>
     [HttpGet("{id:long}/history")]
@@ -35,7 +38,8 @@ public class OrdersController(IOrderService orders) : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<OrderDto>> Create(CreateOrderDto input, CancellationToken ct)
     {
-        var created = await orders.CreateAsync(input, ct);
+        var created = await metrics.MeasureAsync("create", () => orders.CreateAsync(input, ct));
+        metrics.OrderCreated(input.PaymentMethod, created.TotalAmount);   // лише після успішного збереження
         return CreatedAtAction(nameof(GetById), new { id = created.Id }, created);
     }
 
@@ -46,7 +50,11 @@ public class OrdersController(IOrderService orders) : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<OrderDto>> AddItem(long id, CreateOrderItemDto input, CancellationToken ct)
-        => Ok(await orders.AddItemAsync(id, input, ct));
+    {
+        var order = await metrics.MeasureAsync("add_item", () => orders.AddItemAsync(id, input, ct));
+        metrics.ItemAdded();
+        return Ok(order);
+    }
 
     /// <summary>Відправляє замовлення на оплату: Submitted → AwaitingPayment.</summary>
     [HttpPost("{id:long}/checkout")]
@@ -55,7 +63,7 @@ public class OrdersController(IOrderService orders) : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Checkout(long id, CancellationToken ct)
     {
-        await orders.ChangeStatusAsync(id, OrderStatuses.AwaitingPayment, ct);
+        await ChangeStatusAsync(id, OrderStatuses.AwaitingPayment, ct);
         return NoContent();
     }
 
@@ -66,7 +74,7 @@ public class OrdersController(IOrderService orders) : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Pay(long id, CancellationToken ct)
     {
-        await orders.ChangeStatusAsync(id, OrderStatuses.Paid, ct);
+        await ChangeStatusAsync(id, OrderStatuses.Paid, ct);
         return NoContent();
     }
 
@@ -77,7 +85,7 @@ public class OrdersController(IOrderService orders) : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> GrantAccess(long id, CancellationToken ct)
     {
-        await orders.ChangeStatusAsync(id, OrderStatuses.AccessGranted, ct);
+        await ChangeStatusAsync(id, OrderStatuses.AccessGranted, ct);
         return NoContent();
     }
 
@@ -88,7 +96,7 @@ public class OrdersController(IOrderService orders) : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Cancel(long id, CancellationToken ct)
     {
-        await orders.ChangeStatusAsync(id, OrderStatuses.Cancelled, ct);
+        await ChangeStatusAsync(id, OrderStatuses.Cancelled, ct);
         return NoContent();
     }
 
@@ -99,7 +107,7 @@ public class OrdersController(IOrderService orders) : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Refund(long id, CancellationToken ct)
     {
-        await orders.ChangeStatusAsync(id, OrderStatuses.Refunded, ct);
+        await ChangeStatusAsync(id, OrderStatuses.Refunded, ct);
         return NoContent();
     }
 
@@ -110,7 +118,13 @@ public class OrdersController(IOrderService orders) : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Delete(long id, CancellationToken ct)
     {
-        await orders.DeleteAsync(id, ct);
+        await metrics.MeasureAsync("delete", () => orders.DeleteAsync(id, ct));
         return NoContent();
+    }
+
+    private async Task ChangeStatusAsync(long id, string newStatus, CancellationToken ct)
+    {
+        await metrics.MeasureAsync("change_status", () => orders.ChangeStatusAsync(id, newStatus, ct));
+        metrics.StatusChanged(newStatus);
     }
 }

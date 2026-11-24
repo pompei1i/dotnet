@@ -8,6 +8,7 @@
 - **Лабораторна робота №4** — сервіс `Reviews` на базі Проєкту №3: Clean Architecture з чотирьох шарів, CQRS і MediatR із pipeline behaviors, Value Objects, MongoDB з BsonClassMap, оптимістичною конкурентністю, індексами й сідінгом. Див. [Сервіс Reviews](#сервіс-reviews--clean-architecture-cqrs-mongodb-лаб-04).
 - **Лабораторна робота №5** — мікросервісна платформа на .NET Aspire: спільні `ServiceDefaults` (Serilog, OpenTelemetry, CorrelationId), API Gateway на YARP, Aggregator із паралельними викликами й частковими відмовами, трасування й логи всіх сервісів в Aspire Dashboard. Див. [Платформа](#платформа-servicedefaults-api-gateway-aggregator-лаб-05).
 - **Лабораторна робота №6** — gRPC і кешування: Redis в AppHost, дворівневий кеш L1 (`IMemoryCache`) + L2 (Redis) у каталозі курсів і `HybridCache` у відгуках з інвалідацією після запису, gRPC-контракти й сервіси в усіх трьох мікросервісах, Aggregator на паралельних gRPC-викликах із кешем агрегованих відповідей, interceptor і метрики кешу в Dashboard. Див. [gRPC і кешування](#grpc-і-кешування-лаб-06).
+- **Лабораторна робота №7** — резильєнтність і спостережуваність: Standard Resilience Handler без нашарування, різні політики retry / circuit breaker / таймаутів для критичних і некритичних сервісів, retry за gRPC-статусами, graceful degradation Redis, бізнес-метрики (лічильники, гістограми, gauge), health checks SQL Server, MongoDB, Redis (Degraded) і gRPC-залежностей, розділені liveness і readiness. Див. [Resilience, метрики, health checks](#resilience-бізнес-метрики-та-health-checks-лаб-07).
 
 ## Предметна область
 
@@ -1265,6 +1266,205 @@ curl.exe -i http://localhost:5000/api/aggregator/courses/99999/overview
 
 ![Structured logs: інвалідація кешу](docs/screenshots/lab06-cache-logs.png)
 
+## Resilience, бізнес-метрики та health checks (Лаб. 07)
+
+Платформа Лаб. 05–06 отримала три механізми надійності й спостережуваності:
+- **політики стійкості** (Polly через `Microsoft.Extensions.Http.Resilience`), окремі для критичних і некритичних сервісів;
+- **бізнес-метрики** через Meter API;
+- **health checks** усіх залежностей з розділеними liveness і readiness.
+
+### Standard Resilience Handler без нашарування
+
+`Platform.ServiceDefaults/Extensions.cs` підключає стандартний обробник один раз — для **кожного** `HttpClient` і gRPC-клієнта:
+
+```csharp
+builder.Services.ConfigureHttpClientDefaults(http =>
+{
+    http.AddStandardResilienceHandler(options => options.Retry.DisableForUnsafeHttpMethods());
+    http.AddServiceDiscovery();
+    http.AddHttpMessageHandler<CorrelationIdHandler>();
+});
+```
+
+П'ять стратегій, від зовнішньої до внутрішньої: rate limiter → загальний таймаут → retry → circuit breaker → таймаут спроби. Обробник спрацьовує на 5xx, 408, 429, `HttpRequestException` і `TimeoutRejectedException`. Повтори POST/PUT/PATCH/DELETE вимкнено: повторний запис міг би, наприклад, створити замовлення двічі.
+
+Клієнтам Aggregator потрібні інші значення, тож `Platform.Aggregator/Resilience/ResilientGrpcClientExtensions.cs` спершу знімає обробник ServiceDefaults (`RemoveAllResilienceHandlers`) і лише потім додає налаштований. Обробники не нашаровуються. Метод позначено як експериментальний (`EXTEXP0001`, приглушено в `Platform.Aggregator.csproj`), але саме його рекомендує документація для цього сценарію.
+
+### Retry за gRPC-статусами
+
+gRPC повертає помилку (`UNAVAILABLE`, `RESOURCE_EXHAUSTED`) статусом у трейлерах відповіді з HTTP 200. Тому HTTP-обробник її не бачить, він повторює лише мережеві збої й таймаути. Для gRPC-статусів кожен канал має власну `RetryPolicy`:
+
+```csharp
+.ConfigureChannel(channel => channel.ServiceConfig = new ServiceConfig
+{
+    MethodConfigs = { new MethodConfig
+    {
+        Names = { MethodName.Default },
+        RetryPolicy = new RetryPolicy
+        {
+            MaxAttempts = policy.GrpcMaxAttempts, InitialBackoff = policy.GrpcInitialBackoff,
+            MaxBackoff = policy.GrpcMaxBackoff, BackoffMultiplier = 2,
+            RetryableStatusCodes = { StatusCode.Unavailable, StatusCode.ResourceExhausted }
+        }
+    } }
+})
+```
+
+Кожен gRPC-виклик — це POST, а ServiceDefaults вимикає повтори POST. Усі RPC у контрактах платформи лише читають (`GetOrder`, `GetCoursesByIds`, `GetCoursesFeedback`), тобто ідемпотентні. Тому для gRPC-клієнтів повтори HTTP-рівня свідомо увімкнено назад.
+
+### Політики resilience клієнтів Aggregator
+
+Значення задано в `Platform.Aggregator/Resilience/ServiceResiliencePolicy.cs`. `Validate()` під час старту перевіряє, що таймаути узгоджені:
+- загальний таймаут ≥ (повтори + 1) × таймаут спроби + затримки;
+- deadline ≥ загальний таймаут;
+- `SamplingDuration` ≥ 2 × таймаут спроби.
+
+| Параметр | enrollments-api | courses-api | reviews-api |
+|---|---|---|---|
+| Критичність | **критичний**: без замовлення картки немає (503) | **критичний**: без каталогу немає актуальних цін і опису | **некритичний**: без відгуків — часткова відповідь |
+| HTTP retry | 2, експоненційна затримка від 100 мс, jitter | 2, те саме | 1 |
+| Таймаут спроби / загальний | 1.5 с / 5 с | 1.5 с / 5 с | **1 с / 2.5 с** |
+| Circuit breaker: `FailureRatio` | **0.3** (чутливий) | **0.3** | **0.7** (терпимий) |
+| `MinimumThroughput` / `SamplingDuration` | 5 / 30 с | 5 / 30 с | 5 / 30 с |
+| `BreakDuration` | 10 с | 10 с | 20 с |
+| gRPC `RetryPolicy` | 3 спроби, backoff 0.2 → 1 с | 3 спроби, 0.2 → 1 с | 2 спроби, 0.1 → 0.5 с |
+| Deadline виклику | 6 с | 6 с | 3 с |
+
+Чому саме так:
+- **Критичні сервіси** отримують більше повторів, бо їхні дані потрібні обов'язково, а читання ідемпотентні. Breaker у них чутливий: розмикається вже при 30 % збоїв. Якщо замовлення не читаються, краще швидко відповісти 503, ніж тримати клієнтів.
+- **Відгуки** — некритичні, тому швидко здаються: один повтор, спроба 1 с, загальний бюджет 2.5 с. Картка не чекає відгуків довше. Breaker терпиміший (70 %), але розмикається довше, на 20 с: показ відгуків можна відкласти, а сервіс має час відновитися.
+- **`MinimumThroughput` = 5** замість 100 за замовчуванням: на навчальному стенді мало запитів, і зі стандартним значенням breaker не розімкнувся б ніколи.
+- **`SamplingDuration` = 30 с** — щонайменше вдвічі більше за таймаут спроби, інакше валідація опцій не пропустить застосунок.
+
+Переходи breaker логуються: Open — `Error` (тривалість і причина), HalfOpen — `Warning`, Closed — `Information`. Polly v8 виконує ці колбеки у власному фоновому планувальнику, створеному з контекстом *першого* запиту через pipeline. Тому `CorrelationId` у лог береться з HTTP-запиту, що спричинив перехід (`args.Context.GetRequestMessage()`), а чужий ambient-trace прибирається.
+
+Перевірено наживо: reviews-api зупинено в Dashboard, далі 8 запитів `GET /api/aggregator/orders/1/full` з `Cache-Control: no-cache`.
+
+| Запит | Відповідь | Час |
+|---|---|---|
+| 1–2 | 200, `reviews-api is unavailable: timeout` | 2.2 с (спроба 1 с + повтор) |
+| 3–8 | 200, `reviews-api is unavailable: circuit breaker is open` | **11–13 мс** — без очікування таймауту |
+| після Start і 20 с | 200, `warnings` порожній — пробний виклик пройшов, breaker закрився | 90 мс, далі 13–14 мс |
+
+У Лаб. 05 часткова відповідь без breaker щоразу займала 3.3 с.
+
+### Graceful degradation Redis
+
+Кеш — необов'язкова залежність (Лаб. 06):
+- `TwoLevelCache` (Courses), `CachingBehavior` (Reviews) і `AggregateCache` (Aggregator) перехоплюють збої Redis, логують їх `Warning` і читають з бази / збирають через gRPC;
+- клієнт Redis налаштовано на `BacklogPolicy.FailFast` і таймаути 1–2 с, щоб запит не чекав 5 с;
+- health check Redis має статус **Degraded**, а не Unhealthy.
+
+Redis зупинено: `GET /api/courses/2` відповідає 200 за 45 мс, картка замовлення — 200 за 16 мс без попереджень, `/health/ready` — **200 Degraded**.
+
+### Бізнес-метрики
+
+Класи метрик лежать у `<Сервіс>.Api/Metrics/`. Meter створюється через `IMeterFactory` і називається так само, як сервіс; клас реєструється як Singleton. ServiceDefaults додає ці Meter-и і `Polly`:
+
+```csharp
+.AddMeter(BusinessMeters)          // "Enrollments.Api", "Courses.Api", "Reviews.WebApi"
+.AddMeter("Polly")
+.AddView("*.operation.duration", new ExplicitBucketHistogramConfiguration { Boundaries = [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000] })
+```
+
+| Meter | Інструмент | Тип | Теги |
+|---|---|---|---|
+| `Enrollments.Api` | `orders.created`, `orders.amount` | Counter | `payment.method` |
+| | `orders.status_changed` | Counter | `order.status` |
+| | `orders.items.added` | Counter | — |
+| | `orders.operation.duration` | Histogram, мс | `operation`, `status` (success / failure) |
+| | `orders.by_status` | ObservableGauge | `order.status` |
+| `Courses.Api` | `courses.created` | Counter | `course.level` |
+| | `courses.price_changed`, `courses.lessons.added`, `courses.deleted` | Counter | — |
+| | `courses.publication_changed` | Counter | `action` (publish / unpublish) |
+| | `courses.operation.duration` | Histogram, мс | `operation`, `status` |
+| | `courses.catalog.size` | ObservableGauge | `course.state` (published / draft) |
+| `Reviews.WebApi` | `reviews.created` | Counter | `review.rating` (1–5) |
+| | `reviews.updated`, `reviews.deleted` | Counter | — |
+| | `reviews.comments.added` | Counter | `author.role` |
+| | `reviews.operation.duration` | Histogram, мс | `operation`, `kind`, `status` |
+| | `reviews.operations.in_flight` | ObservableGauge | — |
+
+Правила:
+- **Лічильник збільшується лише після успішної операції.** Тривалість пишеться для **всіх** виконань, включно з невдалими (`MeasureAsync` у контролерах, `MetricsBehavior` у Reviews).
+- **Gauge показує поточний стан, а не накопичене значення.** Callback gauge викликається при кожному зборі метрик (в Aspire — щосекунди), тож базу він не читає. Значення оновлює фоновий сервіс: `OrderStatusSnapshotService` — один `GROUP BY Status` раз на 15 с; `CatalogSnapshotService` — раз на 30 с через кеш.
+- **Кардинальність низька.** Теги мають лише короткі переліки значень; Id замовлень, студентів, курсів, email чи час у теги не потрапляють. Кожна унікальна комбінація тегів — окремий часовий ряд.
+
+### Health checks
+
+| Сервіс | Перевірка | Що робить | Статус збою | Теги | Таймаут |
+|---|---|---|---|---|---|
+| enrollments-api | `enrollments-db` | SQL Server, `SELECT 1` | Unhealthy | database, sql, ready | 5 с (з'єднання 3 с) |
+| courses-api | `courses-db` | SQL Server, `SELECT 1` | Unhealthy | database, sql, ready | 5 с (з'єднання 3 с) |
+| courses-api, reviews-api, aggregator | `redis-cache` | Redis `PING` через той самий `IConnectionMultiplexer` | **Degraded** | cache, redis, ready | 3 с |
+| reviews-api | `reviews-db` | MongoDB `ping` | Unhealthy | database, mongodb, ready | 5 с |
+| aggregator | `grpc-enrollments-api`, `grpc-courses-api` | `grpc.health.v1.Health/Check` | Unhealthy | grpc, downstream, ready | 2 с |
+| aggregator | `grpc-reviews-api` | те саме | **Degraded** — некритична залежність | grpc, downstream, ready | 2 с |
+| усі | `self` | процес живий | — | live | — |
+
+Деталі реалізації:
+- Перевірки сервісів лежать у `<Сервіс>.Api/HealthChecks/` (у Reviews — `Reviews.WebApi/HealthChecks/`). Перевірки Aggregator — у `Platform.Aggregator/HealthChecks/`.
+- Вбудовані Unhealthy-перевірки Redis з Aspire-інтеграції вимкнено (`DisableHealthChecks = true`): їх замінено власними Degraded.
+- **gRPC Health Checking Protocol.** Кожен сервіс викликає `AddGrpcHealthChecks()` + `MapGrpcHealthChecksService()`. Статус `SERVING` будується лише з обов'язкових перевірок (тег `ready` без `cache`), тож недоступний Redis не робить сервіс `NOT_SERVING` для Aggregator.
+- **Перевірка в Aggregator.** `GrpcDependencyHealthCheck` викликає `Health.HealthClient.CheckAsync` з deadline 2 с. Health-клієнти без повторів і breaker: перевірка має бачити справжній стан. `RpcException` перетворюється на статус збою з реєстрації й логується.
+- **Connect Timeout для SQL.** Для SQL-перевірок задано окремий `Connect Timeout = 3`: SqlClient не перериває відкриття з'єднання за токеном. Без цього недоступна база тримала б `/health/ready` 15 с — так і було до виправлення.
+
+Endpoints (`MapDefaultEndpoints` у ServiceDefaults) доступні в **усіх** середовищах, бо їх опитують Aspire і Kubernetes (Лаб. 10):
+
+| Endpoint | Перевірки | Навіщо | Збій означає |
+|---|---|---|---|
+| `/health/live` (і `/alive`) | лише `self` | процес живий | перезапуск процесу |
+| `/health/ready` | тег `ready` + JSON-деталі | готовий приймати трафік | тимчасове виключення з балансування |
+| `/health` | усі + JSON-деталі | діагностика | — |
+
+JSON (`HealthResponseWriter`) містить для кожної перевірки статус, тривалість, теги й опис. Текст винятку виходить назовні лише в Development, в інших середовищах — тільки його тип. Degraded відповідає 200, Unhealthy — 503.
+
+AppHost опитує `WithHttpHealthCheck("/health/ready")`. Тому Dashboard показує стан ресурсу за реальними залежностями, а `WaitFor` чекає здорової, а не лише запущеної залежності.
+
+Перевірено:
+- **SQL Server зупинено:** у courses-api `/health/live` → 200, `/health/ready` → 503 Unhealthy. Aggregator і enrollments-api — Unhealthy, reviews-api лишається здоровим.
+- **Redis зупинено:** `/health/ready` → 200 **Degraded**.
+
+### Моніторинг у Dashboard
+
+| Що | Де | Норма |
+|---|---|---|
+| Повтори й розмикання | Metrics → aggregator → `Polly` → `resilience.polly.strategy.events`, фільтр `event.name` (OnRetry, OnTimeout, OnCircuitOpened, OnCircuitHalfOpened, OnCircuitClosed), `pipeline.name` — окремо для кожного клієнта | OnRetry поодинокі; OnCircuitOpened — сигнал розслідувати сервіс, а не «resilience спрацювала» |
+| Переходи breaker | Structured logs, фільтр `Message contains Circuit` | — |
+| Бізнес-операції | Metrics → enrollments-api → `orders.created` за `payment.method`; `orders.operation.duration` | частка `status=failure` біля 0 |
+| Кеш | `Courses.Cache` → `cache.hit_ratio` | L1 > 0.8 на гарячих даних |
+| Стан ресурсів | Resources: Running / Running (Unhealthy), деталі — клік на ресурс | усі Running |
+
+### Знімки екрана
+
+Метрика Polly `resilience.polly.strategy.events` після зупинки reviews-api, з усіма значеннями `event.name`:
+
+![resilience.polly.strategy.events з OnRetry і OnCircuitOpened](docs/screenshots/lab07-polly-events.png)
+
+Переходи circuit breaker у логах: Open (Error) → HalfOpen (Warning) → Closed (Information), з CorrelationId запиту:
+
+![Логи переходів circuit breaker](docs/screenshots/lab07-circuit-logs.png)
+
+Бізнес-метрика `orders.created` з фільтром `payment.method` і гістограма `orders.operation.duration`:
+
+![orders.created](docs/screenshots/lab07-orders-created.png)
+
+![orders.operation.duration](docs/screenshots/lab07-orders-duration.png)
+
+`/health/ready` каталогу при зупиненому Redis — Degraded, база Healthy:
+
+![/health/ready з Degraded](docs/screenshots/lab07-health-ready-degraded.png)
+
+При зупиненому SQL Server `/health/ready` — 503 Unhealthy, а Resources показує нездорові сервіси:
+
+![/health/ready з Unhealthy](docs/screenshots/lab07-health-ready-unhealthy.png)
+
+![Resources при зупиненому SQL Server](docs/screenshots/lab07-resources-sql-down.png)
+
+Усі ресурси здорові:
+
+![Resources](docs/screenshots/lab07-resources.png)
+
 ## Контексти та бази даних
 
 Систему поділено на три незалежні контексти (Bounded Contexts). Кожен має власну базу; кожна сутність належить рівно одному контексту.
@@ -1446,18 +1646,18 @@ erDiagram
 README.md                  опис домену, запуск, розгортання БД, таблиця дублювання, ERD
 Platform.slnx              одне рішення на всю платформу
 Platform.AppHost/          оркестрація .NET Aspire (AppHost.cs): бази, сервіси, Aggregator, Gateway
-Platform.ServiceDefaults/  Extensions.cs (Serilog, OpenTelemetry, resilience, health), CorrelationIdMiddleware, CorrelationIdHandler, Grpc/GrpcLoggingInterceptor
+Platform.ServiceDefaults/  Extensions.cs (Serilog, OpenTelemetry, resilience, health), CorrelationIdMiddleware, CorrelationIdHandler, Grpc/GrpcLoggingInterceptor, HealthChecks/HealthResponseWriter
 Platform.ApiGateway/       YARP: маршрути й кластери в appsettings.json, Logging/ (лог маршрутизації, метрики)
-Platform.Aggregator/       Clients/ (обгортки gRPC-клієнтів), Caching/ (кеш агрегованих відповідей у Redis), Services/ (агрегація, часткові відмови), Models/ (композитні DTO)
+Platform.Aggregator/       Clients/ (обгортки gRPC-клієнтів), Resilience/ (політики стійкості клієнтів), HealthChecks/ (gRPC health залежностей), Caching/ (кеш агрегованих відповідей у Redis), Services/ (агрегація, часткові відмови), Models/ (композитні DTO)
 Services/
   Enrollments/             Проєкт №1 — ADO.NET + Dapper
-    Enrollments.Api/       контролери, Protos/enrollments.proto, Grpc/ (gRPC-сервіс), Program.cs, appsettings.json, обробник помилок
+    Enrollments.Api/       контролери, Protos/enrollments.proto, Grpc/ (gRPC-сервіс), Metrics/, HealthChecks/, Program.cs, appsettings.json, обробник помилок
     Enrollments.Bll/       сервіси, DTO, профілі AutoMapper, бізнес-правила
     Enrollments.Dal/       інтерфейси й реалізації репозиторіїв, Unit of Work
     Enrollments.Domain/    моделі, статуси, доменні винятки
     Enrollments.Tests/     unit-тести BLL і API-тести
   Courses/                 Проєкт №2 — EF Core
-    Courses.Api/           контролери, Protos/courses.proto, Grpc/ (gRPC-сервіс), Program.cs, appsettings.json, обробник помилок, Dockerfile
+    Courses.Api/           контролери, Protos/courses.proto, Grpc/ (gRPC-сервіс), Metrics/, HealthChecks/, Program.cs, appsettings.json, обробник помилок, Dockerfile
     Courses.Bll/           сервіси, DTO, профілі AutoMapper, специфікації, валідатори, Caching/ (L1 + L2, метрики, прогрівання)
     Courses.Dal/           DbContext, Configurations/, Migrations/, репозиторії, Unit of Work, Seeding/
     Courses.Domain/        сутності з бізнес-правилами, доменні винятки
@@ -1466,7 +1666,7 @@ Services/
     Reviews.Domain/        сутності, value objects, перерахування, доменні винятки, інтерфейси репозиторіїв
     Reviews.Application/   Commands/, Queries/, Common/Behaviors/, Caching/ (HybridCache, CachingBehavior), валідатори, DTO, профілі AutoMapper
     Reviews.Infrastructure/ Persistence/ (Mongo-контекст, BSON-мапінг, репозиторії, читання), Seeding/
-    Reviews.WebApi/        контролери, Protos/reviews.proto, Grpc/ (gRPC-сервіс), Program.cs, обробка помилок, appsettings.{Environment}.json
+    Reviews.WebApi/        контролери, Protos/reviews.proto, Grpc/ (gRPC-сервіс), Metrics/, HealthChecks/, Program.cs, обробка помилок, appsettings.{Environment}.json
     Reviews.Tests/         тести домену, behaviors, BSON-мапінгу, запитів, архітектури та API
 dotnet-tools.json          локальний інструмент dotnet-ef
 docs/
@@ -1616,4 +1816,4 @@ EXEC dbo.usp_ChangeOrderStatus @OrderId = 3, @NewStatus = N'AccessGranted';
 
 ## Що далі
 
-Сервіси об'єднано в платформу з єдиною точкою входу, наскрізним трасуванням і агрегацією, а внутрішні виклики переведено на gRPC із кешуванням у пам'яті та Redis. Наступна робота — Лаб. 07 (власні метрики й політики стійкості).
+Сервіси об'єднано в платформу з єдиною точкою входу, наскрізним трасуванням і агрегацією, а внутрішні виклики переведено на gRPC із кешуванням у пам'яті та Redis. Також додано політики стійкості, бізнес-метрики й health checks. Наступна робота — Лаб. 08 (події через брокер повідомлень).

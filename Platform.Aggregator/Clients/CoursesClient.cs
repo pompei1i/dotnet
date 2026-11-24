@@ -1,4 +1,5 @@
 using Courses.Grpc;
+using Platform.Aggregator.Resilience;
 
 namespace Platform.Aggregator.Clients;
 
@@ -8,7 +9,7 @@ namespace Platform.Aggregator.Clients;
 /// </summary>
 public sealed class CoursesClient(CoursesService.CoursesServiceClient grpc, ILogger<CoursesClient> logger) : GrpcUpstream(logger)
 {
-    public override string ServiceName => "courses-api";
+    protected override ServiceResiliencePolicy Policy => ServiceResiliencePolicy.Courses;
 
     public async Task<CourseResponse?> GetCourseAsync(long courseId, CancellationToken ct)
     {

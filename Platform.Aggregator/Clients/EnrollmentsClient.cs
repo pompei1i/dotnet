@@ -1,11 +1,12 @@
 using Enrollments.Grpc;
+using Platform.Aggregator.Resilience;
 
 namespace Platform.Aggregator.Clients;
 
 /// <summary>Клієнт сервісу Enrollments (Лаб. 02) поверх згенерованого gRPC-клієнта: замовлення й продажі курсів.</summary>
 public sealed class EnrollmentsClient(OrdersService.OrdersServiceClient grpc, ILogger<EnrollmentsClient> logger) : GrpcUpstream(logger)
 {
-    public override string ServiceName => "enrollments-api";
+    protected override ServiceResiliencePolicy Policy => ServiceResiliencePolicy.Enrollments;
 
     public async Task<OrderResponse?> GetOrderAsync(long orderId, CancellationToken ct)
     {

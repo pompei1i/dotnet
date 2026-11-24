@@ -4,6 +4,9 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- RemoveAllResilienceHandlers (Microsoft.Extensions.Http.Resilience) позначено як експериментальний API.
+         Саме його рекомендують, щоб замінити обробник ServiceDefaults власним без нашарування (Лаб. 07) -->
+    <NoWarn>$(NoWarn);EXTEXP0001</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -21,7 +24,9 @@
 
   <ItemGroup>
     <PackageReference Include="Aspire.StackExchange.Redis.DistributedCaching" Version="13.6.1" />
+    <PackageReference Include="AspNetCore.HealthChecks.Redis" Version="9.0.0" />
     <PackageReference Include="Google.Protobuf" Version="3.36.2" />
+    <PackageReference Include="Grpc.HealthCheck" Version="2.85.0" />
     <PackageReference Include="Grpc.Net.ClientFactory" Version="2.85.0" />
     <PackageReference Include="Grpc.Tools" Version="2.85.0">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>

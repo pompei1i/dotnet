@@ -38,11 +38,8 @@ public static class DependencyInjection
         services.AddHostedService<IndexCreationService>();
         services.AddHostedService<DataSeedingService>();
 
-        services.AddHealthChecks().AddMongoDb(
-            clientFactory: sp => sp.GetRequiredService<MongoDbContext>().Client,
-            databaseNameFactory: sp => sp.GetRequiredService<IOptions<MongoDbOptions>>().Value.DatabaseName,
-            name: "mongodb",
-            tags: ["ready"]);
+        // Health check MongoDB (reviews-db) реєструє WebApi — Reviews.WebApi/HealthChecks (Лаб. 07)
+
 
         return services;
     }

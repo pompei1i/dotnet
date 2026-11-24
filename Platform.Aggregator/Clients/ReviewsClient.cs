@@ -1,4 +1,5 @@
 using Reviews.Grpc;
+using Platform.Aggregator.Resilience;
 
 namespace Platform.Aggregator.Clients;
 
@@ -10,7 +11,7 @@ public sealed class ReviewsClient(ReviewsService.ReviewsServiceClient grpc, ILog
 {
     private const int LatestReviewsCount = 3;
 
-    public override string ServiceName => "reviews-api";
+    protected override ServiceResiliencePolicy Policy => ServiceResiliencePolicy.Reviews;
 
     public async Task<CourseFeedbackResponse?> GetFeedbackAsync(long courseId, CancellationToken ct)
         => (await GetFeedbackAsync([courseId], ct)).GetValueOrDefault(courseId);

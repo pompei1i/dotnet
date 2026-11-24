@@ -99,6 +99,21 @@ public sealed class OrderRepository : BaseDapperRepository<Order>, IOrderReposit
         return await Connection.ExecuteScalarAsync<int>(Command(sql, new { StudentId = studentId }, ct));
     }
 
+    public async Task<IReadOnlyDictionary<string, int>> CountByStatusAsync(CancellationToken ct = default)
+    {
+        // Легкий агрегат за індексованим стовпцем Status; читається раз на 15 с, а не на кожен збір метрик
+        const string sql = """
+            SELECT Status, COUNT(*) AS OrdersCount
+            FROM dbo.Orders
+            WHERE IsDeleted = 0
+            GROUP BY Status
+            """;
+
+        await EnsureOpenAsync(ct);
+        var rows = await Connection.QueryAsync<(string Status, int OrdersCount)>(Command(sql, null, ct));
+        return rows.ToDictionary(row => row.Status, row => row.OrdersCount);
+    }
+
     public async Task AddDetailsAsync(OrderDetails details, CancellationToken ct = default)
     {
         const string sql = """

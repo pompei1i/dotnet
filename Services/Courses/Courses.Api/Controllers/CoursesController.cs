@@ -1,3 +1,4 @@
+using Courses.Api.Metrics;
 using Courses.Bll.Dtos;
 using Courses.Bll.Services;
 using FluentValidation;
@@ -8,10 +9,11 @@ namespace Courses.Api.Controllers;
 /// <summary>
 /// Тонкий контролер каталогу: валідація запиту, виклик сервісу, HTTP-статус.
 /// До DbContext контролер не звертається; винятки перетворює DomainExceptionHandler.
+/// Лаб. 07: тривалість кожної операції (успіх і відмова) — courses.operation.duration, успіх — бізнес-лічильники.
 /// </summary>
 [ApiController]
 [Route("api/courses")]
-public class CoursesController(ICourseService courses) : ControllerBase
+public class CoursesController(ICourseService courses, CatalogMetrics metrics) : ControllerBase
 {
     /// <summary>Сторінка каталогу з фільтрами й сортуванням; метадані сторінки — у тілі та заголовках X-Total-*.</summary>
     [HttpGet]
@@ -36,7 +38,7 @@ public class CoursesController(ICourseService courses) : ControllerBase
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<CourseDetailsDto>> GetById(long id, CancellationToken ct)
-        => Ok(await courses.GetByIdAsync(id, ct));
+        => Ok(await metrics.MeasureAsync("get", () => courses.GetByIdAsync(id, ct)));
 
     [HttpPost]
     [ProducesResponseType(StatusCodes.Status201Created)]
@@ -52,7 +54,8 @@ public class CoursesController(ICourseService courses) : ControllerBase
         if (!validation.IsValid)
             return ValidationProblem(new ValidationProblemDetails(validation.ToDictionary()));
 
-        var created = await courses.CreateAsync(input, ct);
+        var created = await metrics.MeasureAsync("create", () => courses.CreateAsync(input, ct));
+        metrics.CourseCreated(created.Level);
         return CreatedAtAction(nameof(GetById), new { id = created.Id }, created);
     }
 
@@ -71,7 +74,8 @@ public class CoursesController(ICourseService courses) : ControllerBase
         if (!validation.IsValid)
             return ValidationProblem(new ValidationProblemDetails(validation.ToDictionary()));
 
-        await courses.ChangePriceAsync(id, input, ct);
+        await metrics.MeasureAsync("change_price", () => courses.ChangePriceAsync(id, input, ct));
+        metrics.PriceChanged();
         return NoContent();
     }
 
@@ -82,7 +86,8 @@ public class CoursesController(ICourseService courses) : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Publish(long id, CancellationToken ct)
     {
-        await courses.PublishAsync(id, ct);
+        await metrics.MeasureAsync("publish", () => courses.PublishAsync(id, ct));
+        metrics.PublicationChanged(published: true);
         return NoContent();
     }
 
@@ -92,7 +97,8 @@ public class CoursesController(ICourseService courses) : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Unpublish(long id, CancellationToken ct)
     {
-        await courses.UnpublishAsync(id, ct);
+        await metrics.MeasureAsync("unpublish", () => courses.UnpublishAsync(id, ct));
+        metrics.PublicationChanged(published: false);
         return NoContent();
     }
 
@@ -103,7 +109,8 @@ public class CoursesController(ICourseService courses) : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<LessonDto>> AddLesson(long id, CreateLessonDto input, CancellationToken ct)
     {
-        var lesson = await courses.AddLessonAsync(id, input, ct);
+        var lesson = await metrics.MeasureAsync("add_lesson", () => courses.AddLessonAsync(id, input, ct));
+        metrics.LessonAdded();
         return CreatedAtAction(nameof(GetById), new { id }, lesson);
     }
 
@@ -115,7 +122,7 @@ public class CoursesController(ICourseService courses) : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> AssignCategory(long id, AssignCategoryDto input, CancellationToken ct)
     {
-        await courses.AssignCategoryAsync(id, input, ct);
+        await metrics.MeasureAsync("assign_category", () => courses.AssignCategoryAsync(id, input, ct));
         return NoContent();
     }
 
@@ -126,7 +133,8 @@ public class CoursesController(ICourseService courses) : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Delete(long id, CancellationToken ct)
     {
-        await courses.DeleteAsync(id, ct);
+        await metrics.MeasureAsync("delete", () => courses.DeleteAsync(id, ct));
+        metrics.CourseDeleted();
         return NoContent();
     }
 }

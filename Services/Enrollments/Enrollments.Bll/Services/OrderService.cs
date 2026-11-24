@@ -193,6 +193,14 @@ public class OrderService(IUnitOfWork uow, IMapper mapper, ILogger<OrderService>
         logger.LogInformation("Order {OrderId} deleted", id);
     }
 
+    public async Task<IReadOnlyDictionary<string, int>> GetCountsByStatusAsync(CancellationToken ct = default)
+    {
+        var counts = await uow.Orders.CountByStatusAsync(ct);
+
+        // Статус без жодного замовлення теж має бути в результаті — інакше gauge «зависав» би на старому значенні
+        return OrderStatuses.All.ToDictionary(status => status, status => counts.GetValueOrDefault(status));
+    }
+
     /// <summary>
     /// Додає позицію зі ЗНІМКОМ назви та ціни курсу: значення беруться з локального довідника
     /// dbo.Courses у момент оформлення й надалі не оновлюються (політика дублювання з Лаб. 01).

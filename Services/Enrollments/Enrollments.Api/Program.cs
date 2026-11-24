@@ -1,5 +1,7 @@
 using Enrollments.Api.Controllers;
 using Enrollments.Api.Grpc;
+using Enrollments.Api.HealthChecks;
+using Enrollments.Api.Metrics;
 using Platform.ServiceDefaults.Grpc;
 using Enrollments.Bll.Mapping;
 using Enrollments.Bll.Services;
@@ -15,6 +17,14 @@ builder.AddServiceDefaults();
 // ConnectionStrings__EnrollmentsDb — саме так його передає .NET Aspire (Platform.AppHost).
 var connectionString = builder.Configuration.GetConnectionString("EnrollmentsDb")
     ?? throw new InvalidOperationException("Connection string 'EnrollmentsDb' is missing");
+
+// ---------- Лаб. 07: health checks і бізнес-метрики ----------
+// enrollments-db (SQL Server, SELECT 1, тег ready) і gRPC Health Checking Protocol — HealthChecks/
+builder.AddEnrollmentsHealthChecks(connectionString);
+
+// Клас бізнес-метрик — Singleton на весь час роботи; знімок для gauge orders.by_status — фоновий сервіс
+builder.Services.AddSingleton<OrderMetrics>();
+builder.Services.AddHostedService<OrderStatusSnapshotService>();
 
 // DAL: Unit of Work — Scoped, тобто один екземпляр і одне з'єднання на HTTP-запит
 builder.Services.AddScoped<IUnitOfWork>(_ => new UnitOfWork(connectionString));
@@ -70,7 +80,8 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapControllers();
-app.MapGrpcService<OrdersGrpcService>();   // gRPC-API замовлень для Aggregator
+app.MapGrpcService<OrdersGrpcService>();
+app.MapGrpcHealthChecksService();   // grpc.health.v1.Health — для Aggregator   // gRPC-API замовлень для Aggregator
 app.MapDefaultEndpoints();   // /health і /alive
 
 app.Run();

@@ -3,7 +3,10 @@ using Reviews.Application;
 using Reviews.Infrastructure;
 using Platform.ServiceDefaults.Grpc;
 using Reviews.WebApi;
+using MediatR;
 using Reviews.WebApi.Grpc;
+using Reviews.WebApi.HealthChecks;
+using Reviews.WebApi.Metrics;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -30,7 +33,8 @@ builder.Services.AddMemoryCache(options =>
 // HybridCache з Application-шару підхоплює його автоматично. Без Aspire (рядка підключення немає,
 // наприклад dotnet run або тести) сервіс працює лише з L1
 if (!string.IsNullOrEmpty(builder.Configuration.GetConnectionString("redis")))
-    builder.AddRedisDistributedCache("redis", configureOptions: redis =>
+    // Вбудований health check інтеграції (Unhealthy) вимкнено: свій redis-cache зі статусом Degraded — HealthChecks/
+    builder.AddRedisDistributedCache("redis", settings => settings.DisableHealthChecks = true, redis =>
     {
         // Redis — прискорювач: якщо він недоступний, команди мають падати одразу (FailFast), а не стояти
         // в черзі до timeout (5 с за замовчуванням), інакше кожен запит чекав би секунди замість мілісекунд
@@ -54,6 +58,14 @@ builder.Services
     .AddInfrastructure(builder.Configuration)    // MongoDB: мапінг, репозиторії, індекси, сідінг, health check
     .AddWebApi(builder.Configuration);           // контролери, AutoMapper, ProblemDetails, Swagger
 
+// ---------- Лаб. 07: health checks і бізнес-метрики ----------
+// reviews-db (MongoDB ping), redis-cache (Degraded) і gRPC Health Checking Protocol — HealthChecks/
+builder.AddReviewsHealthChecks();
+
+// Клас метрик — Singleton; MetricsBehavior додається після behaviors Application, тобто найближче до обробника
+builder.Services.AddSingleton<ReviewMetrics>();
+builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(MetricsBehavior<,>));
+
 var app = builder.Build();
 
 // CorrelationId з ServiceDefaults стоїть першим, щоб його бачили всі логи запиту, зокрема логи behaviors
@@ -76,7 +88,8 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapControllers();
-app.MapGrpcService<ReviewsGrpcService>();   // gRPC-API відгуків для Aggregator (endpoint "grpc", HTTP/2)
+app.MapGrpcService<ReviewsGrpcService>();
+app.MapGrpcHealthChecksService();   // grpc.health.v1.Health — для Aggregator   // gRPC-API відгуків для Aggregator (endpoint "grpc", HTTP/2)
 app.MapDefaultEndpoints();   // /health (зокрема перевірка MongoDB) і /alive
 
 app.Run();

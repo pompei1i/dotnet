@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Grpc.Core;
+using Platform.Aggregator.Resilience;
 
 namespace Platform.Aggregator.Clients;
 
@@ -15,17 +16,17 @@ namespace Platform.Aggregator.Clients;
 /// </summary>
 public abstract class GrpcUpstream(ILogger logger)
 {
-    /// <summary>
-    /// Верхня межа одного виклику. Спроби всередині обмежує resilience-обробник (1.5 с на спробу,
-    /// Program.cs); deadline додатково передається серверу, і той перестає працювати над запитом,
-    /// на відповідь на який уже ніхто не чекає.
-    /// </summary>
-    protected static readonly TimeSpan CallTimeout = TimeSpan.FromSeconds(4);
+    /// <summary>Політика стійкості сервісу (Лаб. 07): критичність, повтори, breaker, таймаути.</summary>
+    protected abstract ServiceResiliencePolicy Policy { get; }
 
     /// <summary>Логічне ім'я сервісу в AppHost — воно ж у логах і попередженнях.</summary>
-    public abstract string ServiceName { get; }
+    public string ServiceName => Policy.Service;
 
-    protected static CallOptions Options(CancellationToken ct) => new(deadline: DateTime.UtcNow.Add(CallTimeout), cancellationToken: ct);
+    /// <summary>
+    /// Deadline — верхня межа виклику разом з усіма повторами (gRPC RetryPolicy і HTTP-обробника).
+    /// Він передається й серверу: той перестає працювати над запитом, на відповідь на який уже ніхто не чекає.
+    /// </summary>
+    protected CallOptions Options(CancellationToken ct) => new(deadline: DateTime.UtcNow.Add(Policy.CallDeadline), cancellationToken: ct);
 
     /// <summary>Виклик із логуванням; NOT_FOUND -> null («такого запису немає», а не відмова сервісу).</summary>
     protected async Task<T?> CallAsync<T>(string method, Func<AsyncUnaryCall<T>> call) where T : class

@@ -21,4 +21,7 @@ public interface IOrderService
     Task ChangeStatusAsync(long orderId, string newStatus, CancellationToken ct = default);
 
     Task DeleteAsync(long id, CancellationToken ct = default);
+
+    /// <summary>Скільки замовлень зараз у кожному статусі (усі статуси, зокрема з нулем).</summary>
+    Task<IReadOnlyDictionary<string, int>> GetCountsByStatusAsync(CancellationToken ct = default);
 }
